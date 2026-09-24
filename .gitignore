@@ -1,0 +1,5 @@
+.DS_Store
+*.app/
+dist/
+# Older standalone copy of the project
+BirdFlight/
