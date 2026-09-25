@@ -9,11 +9,13 @@
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleIconName</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>0.2</string>
+    <key>CFBundleVersion</key><string>2</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSCameraUsageDescription</key><string>Bird Game watches your arms so you can flap, bank and dive like a bird.</string>
+    <key>NSLocalNetworkUsageDescription</key><string>Bird Game finds friends' games on your network so you can play together.</string>
+    <key>NSBonjourServices</key><array><string>_birdgame._tcp</string></array>
     <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict>
 </plist>

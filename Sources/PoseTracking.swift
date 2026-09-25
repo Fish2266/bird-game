@@ -97,6 +97,11 @@ struct ControlState {
     var handsVisible = 0
     var flapCount = 0
     var hint = ""
+    /// Mouth tracking (only while attacks are possible): how wide open, 0…1, and whether a face is in view.
+    var mouthOpen: Float = 0
+    var mouthSeen = false
+    /// Goes up by one every time the mouth opens all the way (an attack).
+    var attackCount = 0
 }
 
 /// Turns noisy 2D keypoints into smooth, low-latency flight controls.
@@ -345,4 +350,67 @@ final class SharedControls {
     }
     var control: ControlState { lock.lock(); defer { lock.unlock() }; return _control }
     var pose: RawPose? { lock.lock(); defer { lock.unlock() }; return _pose }
+}
+
+// MARK: - Mouth (attacks)
+
+/// Finds the player's face near the tracked nose and measures how far the mouth is open. Opening it all the way
+/// counts as one attack; it has to close again before the next one.
+final class MouthTracker {
+    private let request = VNDetectFaceLandmarksRequest()
+    /// Only runs while the game can use attacks (it costs a few ms per frame).
+    var enabled = false
+    private var open: Float = 0
+    private var armed = true
+    private var baseline: Float = 0.08
+    private var lastSeen: Double = -10
+    private var skip = false
+    private(set) var count = 0
+
+    func process(_ pb: CVPixelBuffer, pose: RawPose?, time: Double) -> (open: Float, seen: Bool, count: Int) {
+        guard enabled else { return (0, false, count) }
+        // Every other camera frame is plenty and keeps arm tracking fast.
+        skip.toggle()
+        if skip { return (open, time - lastSeen < 0.4, count) }
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
+        let aspect = Float(w) / Float(max(h, 1))
+        // Look around the nose (Vision coordinates: normalized, origin bottom-left).
+        var roi = CGRect(x: 0, y: 0, width: 1, height: 1)
+        if let pose {
+            let nose = pose[.nose], ls = pose[.lShoulder], rs = pose[.rShoulder]
+            if nose.z > 0.2 {
+                let shoulders = ls.z > 0.2 && rs.z > 0.2 ? abs(ls.x - rs.x) : 0.12
+                let side = clamp(shoulders * 1.4, 0.08, 0.5)
+                let hh = min(side * aspect, 1)
+                roi = CGRect(x: CGFloat(nose.x - side / 2), y: CGFloat(nose.y - hh * 0.6), width: CGFloat(side), height: CGFloat(hh))
+                    .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+                if roi.width < 0.02 || roi.height < 0.02 { roi = CGRect(x: 0, y: 0, width: 1, height: 1) }
+            }
+        }
+        request.regionOfInterest = roi
+        let handler = VNImageRequestHandler(cvPixelBuffer: pb, orientation: .up, options: [:])
+        var ratio: Float?
+        if (try? handler.perform([request])) != nil, let face = request.results?.max(by: { $0.boundingBox.width < $1.boundingBox.width }),
+           let inner = face.landmarks?.innerLips, let outer = face.landmarks?.outerLips {
+            let size = CGSize(width: w, height: h)
+            let ip = inner.pointsInImage(imageSize: size), op = outer.pointsInImage(imageSize: size)
+            if ip.count >= 4, op.count >= 4 {
+                let gap = (ip.map(\.y).max()! - ip.map(\.y).min()!)
+                let width = (op.map(\.x).max()! - op.map(\.x).min()!)
+                if width > 2 { ratio = Float(gap / width) }
+            }
+        }
+        guard let r = ratio else {
+            if time - lastSeen > 0.4 { open = 0; armed = true }
+            return (open, time - lastSeen < 0.4, count)
+        }
+        lastSeen = time
+        // Learn what "closed" looks like for this face.
+        if r < baseline + 0.1 { baseline += (r - baseline) * 0.03 }
+        let o = smoothstep(baseline + 0.05, baseline + 0.34, r)
+        open += (o - open) * 0.6
+        if armed && open > 0.85 { count += 1; armed = false }
+        if open < 0.35 { armed = true }
+        return (open, true, count)
+    }
 }

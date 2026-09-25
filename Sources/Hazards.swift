@@ -48,89 +48,91 @@ private func glowMaterial(_ c: NSColor, _ intensity: CGFloat = 1) -> SCNMaterial
 
 // MARK: - Volcano
 
+/// A lava geyser vent: rumbles and glows, then blasts lava into the air (Volcano).
+final class LavaVent {
+    let pos: SIMD3<Float>
+    let node = SCNNode()
+    let crater: SCNMaterial
+    let spout = SCNParticleSystem()
+    let smoke = SCNParticleSystem()
+    var rng: SplitMix64
+    enum State { case idle, warn, erupt }
+    var state = State.idle
+    var timer: Float
+
+    init(pos: SIMD3<Float>, seed: UInt64) {
+        self.pos = pos
+        rng = SplitMix64(seed: seed)
+        timer = rng.float(1, 7)
+        crater = glowMaterial(NSColor(srgbRed: 1, green: 0.45, blue: 0.1, alpha: 1), 0.6)
+        let vent = SCNNode(geometry: SCNCone(topRadius: 2.4, bottomRadius: 6.5, height: 3.5))
+        vent.geometry?.materials = [{ let m = SCNMaterial(); m.lightingModel = .physicallyBased
+            m.diffuse.contents = NSColor(srgbRed: 0.16, green: 0.13, blue: 0.13, alpha: 1); m.roughness.contents = 0.9; return m }()]
+        vent.position = SCNVector3(0, 0.8, 0)
+        node.addChildNode(vent)
+        let mouth = SCNNode(geometry: SCNCylinder(radius: 2.3, height: 0.3))
+        mouth.geometry?.materials = [crater]
+        mouth.position = SCNVector3(0, 2.5, 0)
+        node.addChildNode(mouth)
+
+        let dot = makeImage(width: 32, height: 32) { x, y in
+            let d = simd_length(SIMD2(Float(x) - 15.5, Float(y) - 15.5)) / 16
+            return SIMD4(1, 1, 1, max(0, 1 - d))
+        }
+        spout.birthRate = 0
+        spout.emitterShape = SCNSphere(radius: 1.6)
+        spout.birthLocation = .volume
+        spout.emittingDirection = SCNVector3(0, 1, 0)
+        spout.spreadingAngle = 7
+        spout.particleVelocity = 62
+        spout.particleVelocityVariation = 14
+        spout.particleLifeSpan = 1.5
+        spout.particleSize = 2.2
+        spout.particleSizeVariation = 1
+        spout.acceleration = SCNVector3(0, -34, 0)
+        spout.particleImage = dot
+        spout.isLightingEnabled = false
+        spout.blendMode = .alpha
+        let col = CAKeyframeAnimation()
+        col.values = [NSColor(srgbRed: 1, green: 0.85, blue: 0.4, alpha: 1), NSColor(srgbRed: 1, green: 0.4, blue: 0.08, alpha: 1),
+                      NSColor(srgbRed: 0.35, green: 0.08, blue: 0.04, alpha: 0.9)]
+        col.keyTimes = [0, 0.4, 1]
+        spout.propertyControllers = [.color: SCNParticlePropertyController(animation: col)]
+        let spoutNode = SCNNode()
+        spoutNode.position = SCNVector3(0, 2.6, 0)
+        spoutNode.addParticleSystem(spout)
+        node.addChildNode(spoutNode)
+
+        smoke.birthRate = 0
+        smoke.emitterShape = SCNSphere(radius: 2)
+        smoke.emittingDirection = SCNVector3(0, 1, 0)
+        smoke.spreadingAngle = 25
+        smoke.particleVelocity = 7
+        smoke.particleLifeSpan = 2.5
+        smoke.particleSize = 3
+        smoke.particleSizeVariation = 1.5
+        smoke.particleColor = NSColor(white: 0.25, alpha: 0.55)
+        smoke.particleImage = dot
+        smoke.isLightingEnabled = false
+        smoke.blendMode = .alpha
+        let fade = CAKeyframeAnimation()
+        fade.values = [0, 0.8, 0]
+        fade.keyTimes = [0, 0.3, 1]
+        smoke.propertyControllers = [.opacity: SCNParticlePropertyController(animation: fade)]
+        spoutNode.addParticleSystem(smoke)
+        node.simdPosition = pos
+    }
+}
+
+
 final class VolcanoRuntime: WorldRuntime {
     let root = SCNNode()
     private(set) var threat: String?
     private let terrain: VolcanoTerrain
     private let cell: Float = 150
-    private var geysers: [ChunkKey: Geyser] = [:]
+    private var geysers: [ChunkKey: LavaVent] = [:]
     private var penalty = Cooldown()
     private var lavaPenalty = Cooldown()
-
-    private final class Geyser {
-        let pos: SIMD3<Float>
-        let node = SCNNode()
-        let crater: SCNMaterial
-        let spout = SCNParticleSystem()
-        let smoke = SCNParticleSystem()
-        var rng: SplitMix64
-        enum State { case idle, warn, erupt }
-        var state = State.idle
-        var timer: Float
-
-        init(pos: SIMD3<Float>, seed: UInt64) {
-            self.pos = pos
-            rng = SplitMix64(seed: seed)
-            timer = rng.float(1, 7)
-            crater = glowMaterial(NSColor(srgbRed: 1, green: 0.45, blue: 0.1, alpha: 1), 0.6)
-            let vent = SCNNode(geometry: SCNCone(topRadius: 2.4, bottomRadius: 6.5, height: 3.5))
-            vent.geometry?.materials = [{ let m = SCNMaterial(); m.lightingModel = .physicallyBased
-                m.diffuse.contents = NSColor(srgbRed: 0.16, green: 0.13, blue: 0.13, alpha: 1); m.roughness.contents = 0.9; return m }()]
-            vent.position = SCNVector3(0, 0.8, 0)
-            node.addChildNode(vent)
-            let mouth = SCNNode(geometry: SCNCylinder(radius: 2.3, height: 0.3))
-            mouth.geometry?.materials = [crater]
-            mouth.position = SCNVector3(0, 2.5, 0)
-            node.addChildNode(mouth)
-
-            let dot = makeImage(width: 32, height: 32) { x, y in
-                let d = simd_length(SIMD2(Float(x) - 15.5, Float(y) - 15.5)) / 16
-                return SIMD4(1, 1, 1, max(0, 1 - d))
-            }
-            spout.birthRate = 0
-            spout.emitterShape = SCNSphere(radius: 1.6)
-            spout.birthLocation = .volume
-            spout.emittingDirection = SCNVector3(0, 1, 0)
-            spout.spreadingAngle = 7
-            spout.particleVelocity = 62
-            spout.particleVelocityVariation = 14
-            spout.particleLifeSpan = 1.5
-            spout.particleSize = 2.2
-            spout.particleSizeVariation = 1
-            spout.acceleration = SCNVector3(0, -34, 0)
-            spout.particleImage = dot
-            spout.isLightingEnabled = false
-            spout.blendMode = .alpha
-            let col = CAKeyframeAnimation()
-            col.values = [NSColor(srgbRed: 1, green: 0.85, blue: 0.4, alpha: 1), NSColor(srgbRed: 1, green: 0.4, blue: 0.08, alpha: 1),
-                          NSColor(srgbRed: 0.35, green: 0.08, blue: 0.04, alpha: 0.9)]
-            col.keyTimes = [0, 0.4, 1]
-            spout.propertyControllers = [.color: SCNParticlePropertyController(animation: col)]
-            let spoutNode = SCNNode()
-            spoutNode.position = SCNVector3(0, 2.6, 0)
-            spoutNode.addParticleSystem(spout)
-            node.addChildNode(spoutNode)
-
-            smoke.birthRate = 0
-            smoke.emitterShape = SCNSphere(radius: 2)
-            smoke.emittingDirection = SCNVector3(0, 1, 0)
-            smoke.spreadingAngle = 25
-            smoke.particleVelocity = 7
-            smoke.particleLifeSpan = 2.5
-            smoke.particleSize = 3
-            smoke.particleSizeVariation = 1.5
-            smoke.particleColor = NSColor(white: 0.25, alpha: 0.55)
-            smoke.particleImage = dot
-            smoke.isLightingEnabled = false
-            smoke.blendMode = .alpha
-            let fade = CAKeyframeAnimation()
-            fade.values = [0, 0.8, 0]
-            fade.keyTimes = [0, 0.3, 1]
-            smoke.propertyControllers = [.opacity: SCNParticlePropertyController(animation: fade)]
-            spoutNode.addParticleSystem(smoke)
-            node.simdPosition = pos
-        }
-    }
 
     init(terrain: VolcanoTerrain) { self.terrain = terrain }
 
@@ -200,7 +202,7 @@ final class VolcanoRuntime: WorldRuntime {
             for di in -r...r where di * di + dj * dj <= r * r {
                 let k = ChunkKey(x: ci + di, z: cj + dj)
                 if geysers[k] == nil, let (pos, seed) = geyserPos(k.x, k.z) {
-                    let g = Geyser(pos: pos, seed: seed)
+                    let g = LavaVent(pos: pos, seed: seed)
                     root.addChildNode(g.node)
                     geysers[k] = g
                 }
@@ -268,6 +270,14 @@ final class CaveRuntime: WorldRuntime {
     private var pendingHits: [HazardHit] = []
     private var penalty = Cooldown()
     private var lastDt: Float = 1.0 / 60
+    private var quiet = false
+
+    /// Wall collisions for birds other than the player (bots): no penalties or sounds.
+    func constrainQuietly(_ flight: FlightModel) {
+        quiet = true
+        _ = constrain(flight)
+        quiet = false
+    }
 
     init(terrain: CaveTerrain) {
         self.terrain = terrain
@@ -366,7 +376,7 @@ final class CaveRuntime: WorldRuntime {
         let bottom = s.floor + 0.9
         if p.y < bottom { p.y = bottom }
         flight.pos = p
-        if impact > 9 && penalty.t == 0 {
+        if impact > 9 && penalty.t == 0 && !quiet {
             pendingHits.append(HazardHit(impulse: .zero, coins: 2, kind: .wall))
             penalty.trigger(1.5)
         }

@@ -116,6 +116,42 @@ final class BirdNode {
         node.enumerateHierarchy { n, _ in n.castsShadow = true }
     }
 
+    private var outline: [SCNNode] = []
+
+    /// "Show location" glow: a see-through-walls shell in `color` around every part of the bird
+    /// (brightest at the silhouette edge). nil removes it.
+    func setOutline(_ color: NSColor?) {
+        outline.forEach { $0.removeFromParentNode() }
+        outline.removeAll()
+        guard let color else { return }
+        let m = SCNMaterial()
+        m.lightingModel = .constant
+        m.diffuse.contents = color
+        m.readsFromDepthBuffer = false
+        m.writesToDepthBuffer = false
+        m.isDoubleSided = true
+        m.blendMode = .alpha
+        m.shaderModifiers = [.fragment: """
+        #pragma transparent
+        #pragma body
+        float rim = 1.0 - abs(dot(normalize(_surface.normal), normalize(_surface.view)));
+        float a = 0.28 + 0.72 * rim * rim;
+        _output.color = float4(_output.color.rgb * a, a);
+        """]
+        var parts: [SCNNode] = []
+        node.enumerateHierarchy { n, _ in if n.geometry != nil { parts.append(n) } }
+        for p in parts {
+            guard let g = p.geometry?.copy() as? SCNGeometry else { continue }
+            g.materials = [m]
+            let shell = SCNNode(geometry: g)
+            shell.simdScale = SIMD3(repeating: 1.18)
+            shell.renderingOrder = 1000
+            shell.castsShadow = false
+            p.addChildNode(shell)
+            outline.append(shell)
+        }
+    }
+
     private static func material(_ c: NSColor, glow: NSColor? = nil) -> SCNMaterial {
         let m = SCNMaterial()
         m.lightingModel = .physicallyBased

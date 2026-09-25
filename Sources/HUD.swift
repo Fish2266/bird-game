@@ -174,6 +174,21 @@ final class HUDView: NSView {
     private let status = WiiLabel(11, color: NSColor.white.withAlphaComponent(0.8))
     let gauge = ControlGaugeView()
     private(set) var preview: CameraPreviewView?
+    // Races, fights, LAN
+    private let raceBox = RaceBox()
+    private let combatBox = CombatBox()
+    private let compass = CompassView()
+    private let feed = FeedView()
+    private let results = ResultsView()
+    private let countdown = WiiLabel(110, bold: true, color: .white)
+    private let bannerBox = WiiPanel()
+    private let bannerLabel = WiiLabel(16, bold: true)
+    private let invitePanel = WiiPanel()
+    private let inviteLabel = WiiLabel(15, bold: true)
+    private var lastPhase = MatchPhase.warmup
+    private var goUntil = Date.distantPast
+    private var racing = false
+    private var compassShown = false
     private var flyingTicks = 0
     private var helpAutoHidden = false
     var showHelp = false { didSet { helpBox.isHidden = !showHelp } }
@@ -252,11 +267,36 @@ final class HUDView: NSView {
         Arms at your sides: dive.
         Fly through the rings to earn ● coins.
 
-        Keys: ←→ bank, ↑↓ pitch, Space flap, Shift dive
-        Esc pause & shop · R recalibrate · H hide help
+        Open your mouth wide to attack (in fights).
+
+        Keys: ←→ bank, ↑↓ pitch, Space flap, Shift dive, Return attack
+        Esc pause, modes & shop · R recalibrate · H hide help
         """
         addSubview(gauge)
         addSubview(status)
+
+        for v in [raceBox, combatBox, compass, feed] as [NSView] { v.isHidden = v !== feed; addSubview(v) }
+        countdown.align = .center
+        countdown.wantsLayer = true
+        countdown.layer?.shadowColor = NSColor.black.cgColor
+        countdown.layer?.shadowOpacity = 0.45
+        countdown.layer?.shadowRadius = 6
+        countdown.layer?.shadowOffset = .zero
+        countdown.isHidden = true
+        addSubview(countdown)
+        bannerBox.addSubview(bannerLabel)
+        bannerLabel.align = .center
+        bannerLabel.centerV = true
+        bannerBox.isHidden = true
+        addSubview(bannerBox)
+        invitePanel.borderColor = Wii.blue
+        invitePanel.addSubview(inviteLabel)
+        inviteLabel.align = .center
+        inviteLabel.centerV = true
+        invitePanel.isHidden = true
+        addSubview(invitePanel)
+        results.isHidden = true
+        addSubview(results)
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -294,11 +334,123 @@ final class HUDView: NSView {
         let pw: CGFloat = 320, ph: CGFloat = pw / (preview.map { CGFloat($0.aspectForLayout) } ?? 4.0 / 3.0)
         preview?.frame = NSRect(x: b.width - pw - 20, y: 20, width: pw, height: ph)
         gauge.frame = NSRect(x: b.width - pw - 20 - 150, y: 16, width: 140, height: 122)
-        helpBox.frame = NSRect(x: 16, y: 16, width: 400, height: 214)
+        helpBox.frame = NSRect(x: 16, y: 16, width: 430, height: 246)
         let hc = helpBox.contentRect
         helpTitle.frame = NSRect(x: hc.minX + 16, y: hc.minY + 14, width: hc.width - 32, height: 22)
         help.frame = NSRect(x: hc.minX + 16, y: hc.minY + 42, width: hc.width - 32, height: hc.height - 50)
         status.frame = NSRect(x: 20, y: b.height - 156, width: 200, height: 16)
+
+        raceBox.frame = NSRect(x: b.width - 316, y: b.height - 112, width: 300, height: 96)
+        let compassTop = racing ? b.height - 116 : b.height - 12
+        compass.frame = NSRect(x: b.width - 196, y: compassTop - 236, width: 180, height: 236)
+        let feedTop = compassShown ? compass.frame.minY - 6 : (racing ? raceBox.frame.minY - 6 : b.height - 16)
+        feed.frame = NSRect(x: b.width - 436, y: feedTop - 150, width: 420, height: 150)
+        combatBox.frame = NSRect(x: 16, y: b.height - 160 - 130, width: 260, height: 128)
+        countdown.frame = NSRect(x: b.width / 2 - 200, y: b.height / 2 - 20, width: 400, height: 130)
+        bannerBox.frame = NSRect(x: b.width / 2 - 300, y: b.height - 300, width: 600, height: 52)
+        bannerLabel.frame = bannerBox.contentRect.insetBy(dx: 16, dy: 0).offsetBy(dx: 0, dy: 1)
+        invitePanel.frame = NSRect(x: b.width / 2 - 280, y: 170, width: 560, height: 58)
+        inviteLabel.frame = invitePanel.contentRect.insetBy(dx: 16, dy: 0).offsetBy(dx: 0, dy: 1)
+        let rh = results.height
+        results.frame = NSRect(x: b.width / 2 - 250, y: (b.height - rh) / 2, width: 500, height: rh)
+    }
+
+    // MARK: Modes
+
+    /// End-of-round results (nil hides them).
+    func showResults(_ r: MatchResult?) {
+        results.result = r
+        results.isHidden = r == nil
+        needsLayout = true
+    }
+
+    /// Small line in the message feed (knock-outs, finishes, joins).
+    func addFeed(_ s: String) { feed.add(s) }
+
+    /// Pending-invite banner at the bottom (nil hides it).
+    func showInvite(_ text: String?) {
+        inviteLabel.text = text ?? ""
+        invitePanel.isHidden = text == nil
+    }
+
+    /// Red center flash (missed ring…).
+    func showWarning(_ text: String) {
+        lossFlash.text = text
+        lossFlash.alphaValue = 1
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 1.6
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            lossFlash.animator().alphaValue = 0
+        }
+    }
+
+    private func updateModes(_ s: HUDStats) {
+        let isRace = s.mode.isRace
+        let boxShown = isRace || (s.mode == .pvp && (s.phase == .running || s.phase == .countdown))
+        if boxShown != racing || s.showCompass != compassShown {
+            racing = boxShown
+            compassShown = s.showCompass
+            needsLayout = true
+        }
+        let fight = s.mode == .pvp && (s.phase == .running || s.phase == .countdown)
+        raceBox.isHidden = !(isRace || fight)
+        if fight {
+            let t = Double(s.fightTimeLeft)
+            raceBox.time = raceClock(t).components(separatedBy: ".").first ?? ""
+            raceBox.gates = s.wallStatus
+            raceBox.penalty = 0
+            raceBox.split = nil
+            raceBox.place = s.fighters > 1 ? "\(s.fightersLeft) birds left" : nil
+            raceBox.ghost = false
+            raceBox.refresh()
+        } else if isRace {
+            raceBox.time = raceClock(s.raceTime)
+            raceBox.gates = s.gateLabel
+            raceBox.penalty = s.penalty
+            raceBox.split = s.split
+            raceBox.ahead = s.splitAhead
+            raceBox.place = s.place
+            raceBox.ghost = s.ghost && s.phase != .done
+            raceBox.refresh()
+        }
+        combatBox.isHidden = !s.combat
+        if s.combat {
+            combatBox.health = s.alive ? s.health : 0
+            combatBox.burning = s.burning
+            combatBox.reload = s.reload
+            combatBox.weapon = s.weaponName
+            combatBox.mouth = s.mouth
+            combatBox.mouthSeen = s.mouthSeen
+            combatBox.keyboard = s.usingKeyboard
+            combatBox.respawn = s.respawnIn
+            combatBox.lives = s.lives
+            combatBox.lock = s.lockName
+            combatBox.lockInRange = s.lockInRange
+            combatBox.left = ""
+            combatBox.refresh()
+        }
+        compass.isHidden = !s.showCompass
+        if s.showCompass { compass.markers = s.markers }
+        feed.tick()
+
+        // 3, 2, 1, GO!
+        if lastPhase == .countdown && s.phase == .running { goUntil = Date().addingTimeInterval(0.9) }
+        lastPhase = s.phase
+        if s.phase == .countdown {
+            countdown.isHidden = false
+            countdown.text = "\(max(1, Int(ceil(s.countdown))))"
+        } else if Date() < goUntil {
+            countdown.isHidden = false
+            countdown.text = "GO!"
+        } else {
+            countdown.isHidden = true
+        }
+        bannerLabel.text = s.banner ?? ""
+        bannerBox.isHidden = s.banner == nil || !results.isHidden
+        if s.offCourse > 0 {
+            threatBox.isHidden = false
+            threatLabel.text = String(format: "Off course! Back on track in %.0f", ceil(s.offCourse))
+        }
     }
 
     func showNotice(_ text: String) {
@@ -348,7 +500,8 @@ final class HUDView: NSView {
 
     func update(_ s: HUDStats, pose: RawPose?, cameraName: String) {
         speed.text = String(format: "%.0f", s.speedKmh)
-        details.text = String(format: "Height %.0f m   Rings %d", s.agl, s.score)
+        details.text = s.mode == .freeRoam ? String(format: "Height %.0f m   Rings %d", s.agl, s.score)
+            : (s.multiplayer ? String(format: "Height %.0f m   %d players", s.agl, s.players) : String(format: "Height %.0f m", s.agl))
         streakLabel.isHidden = !s.streakEnabled
         let bonus = 1 + 0.25 * Double(min(max(s.streak - 1, 0), 8))
         streakLabel.text = s.streak > 1 ? String(format: "Streak %d · ×%.2f", s.streak, bonus) : "Streak \(s.streak)"
@@ -367,9 +520,12 @@ final class HUDView: NSView {
         hint.text = message
         hintBox.isHidden = message.isEmpty
 
+        ring.isHidden = s.ringDistance <= 0
+        arrowHost.isHidden = s.ringDistance <= 0
         if s.ringDistance > 0 {
             let above = s.ringAbove > 15 ? "  ↑" : (s.ringAbove < -15 ? "  ↓" : "")
-            ring.text = String(format: "Next ring  %.0f m", s.ringDistance) + above
+            let what = s.mode == .speedRace ? "Next checkpoint" : (s.mode == .ringRace && s.gateLabel.contains("16 / 16") ? "Finish ring" : "Next ring")
+            ring.text = String(format: "%@  %.0f m", what, s.ringDistance) + above
             CATransaction.begin(); CATransaction.setDisableActions(true)
             arrow.setAffineTransform(CGAffineTransform(rotationAngle: -CGFloat(s.ringBearing)))
             CATransaction.commit()
@@ -383,5 +539,6 @@ final class HUDView: NSView {
         let mode = s.usingKeyboard ? "Keyboard" : (s.control.ready ? "Tracking" : s.control.tracking ? "Show both hands" : "Looking for you")
         preview?.caption.text = "\(cameraName) · \(mode)"
         status.text = String(format: "%.0f fps", s.fps)
+        updateModes(s)
     }
 }

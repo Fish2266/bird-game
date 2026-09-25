@@ -214,6 +214,8 @@ final class WiiButton: FlippedView {
     var textSize: CGFloat
     var isEnabled = true { didSet { needsDisplay = true; window?.invalidateCursorRects(for: self) } }
     var onClick: (() -> Void)?
+    /// Draw a ◀ (-1) or ▶ (+1) arrow instead of the title.
+    var arrow = 0 { didSet { needsDisplay = true } }
     private var hover = false
     private var pressed = false
 
@@ -247,8 +249,20 @@ final class WiiButton: FlippedView {
         let live = isEnabled
         Wii.glossy(r, radius: radius, rim: live ? Wii.blue : Wii.border, rimWidth: hover && live ? 3.5 : 2.5,
                    pressed: pressed, glow: hover && live)
+        let ink = live ? Wii.text : Wii.textSoft.withAlphaComponent(0.7)
+        if arrow != 0 {
+            let s = min(r.width, r.height) * 0.22, c = NSPoint(x: r.midX, y: r.midY + 0.5)
+            let a = CGFloat(arrow)
+            let tri = NSBezierPath()
+            tri.move(to: NSPoint(x: c.x + a * s, y: c.y))
+            tri.line(to: NSPoint(x: c.x - a * s * 0.8, y: c.y - s))
+            tri.line(to: NSPoint(x: c.x - a * s * 0.8, y: c.y + s))
+            tri.close()
+            ink.setFill(); tri.fill()
+            return
+        }
         Wii.drawText(title, in: r.insetBy(dx: 12, dy: 0).offsetBy(dx: 0, dy: 1), size: textSize, bold: true,
-                     color: live ? Wii.text : Wii.textSoft.withAlphaComponent(0.7), align: .center, centerV: true)
+                     color: ink, align: .center, centerV: true)
     }
 }
 

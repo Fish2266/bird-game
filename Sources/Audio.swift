@@ -56,6 +56,7 @@ final class BirdSynth {
 
     // One-shots
     private var chimeT: Float = 10, chimePhase: (Float, Float, Float) = (0, 0, 0)
+    private var beepT: Float = 10, beepFreq: Float = 880, beepPhase: Float = 0, beepLen: Float = 0.16
     private var thump: Float = 0, thumpPhase: Float = 0, thumpFreq: Float = 70
     private var splash: Float = 0
 
@@ -119,6 +120,8 @@ final class BirdSynth {
     }
 
     func chime() { chimeT = 0; chimePhase = (0, 0, 0) }
+    /// Countdown blip (a longer, higher one for GO).
+    func beep(go: Bool) { beepT = 0; beepPhase = 0; beepFreq = go ? 1318.5 : 659.3; beepLen = go ? 0.45 : 0.16 }
     func eruption(_ strength: Float) { boom = max(boom, strength); blast = max(blast, strength); boomPhase = 0 }
     func gunshot(gain: Float, pan: Float) {
         let i = shotNext % shotCount
@@ -262,6 +265,13 @@ final class BirdSynth {
                     let c = (sin(chimePhase.0) * 0.14 + sin(chimePhase.1) * 0.09 + sin(chimePhase.2) * 0.05 * exp(-chimeT * 6)) * env
                     l += c; r += c
                 }
+                if beepT < beepLen {
+                    beepT += dtS
+                    beepPhase += 2 * .pi * beepFreq * dtS
+                    let env = min(1, beepT * 400) * min(1, (beepLen - beepT) * 40)
+                    let c = (sin(beepPhase) * 0.12 + sin(beepPhase * 2) * 0.03) * env
+                    l += c; r += c
+                }
                 if thump > 0.0005 {
                     thumpFreq = max(40, thumpFreq - 60 * dtS)
                     thumpPhase += 2 * .pi * thumpFreq * dtS
@@ -365,6 +375,7 @@ final class SoundEngine {
         synth.wingDown = (downL, downR); synth.wingUp = (upL, upR)
     }
     func chime() { synth.chime() }
+    func beep(go: Bool) { synth.beep(go: go) }
     func impact(_ strength: Float, water: Bool) { synth.impact(strength, water: water) }
     func setMuted(_ m: Bool) { muted = m; synth.volume = m ? 0 : 0.85 }
     func setRumble(_ v: Float) { synth.volcanoRumble = v }

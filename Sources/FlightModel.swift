@@ -59,6 +59,12 @@ final class FlightModel {
         speed *= 0.85
     }
 
+    /// A gentler shove for fights: wobble in proportion to the hit and no lost speed, so you keep control.
+    func nudge(_ impulse: SIMD3<Float>) {
+        knockVel += impulse
+        wobble = max(wobble, min(simd_length(impulse) / 30, 0.7))
+    }
+
     func step(_ dt: Float, _ input: FlightInput) -> FlightEvents {
         var ev = FlightEvents()
         let g = Self.g
