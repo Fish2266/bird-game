@@ -511,12 +511,15 @@ final class LANPanel: FlippedView, NSTextFieldDelegate {
                   inviteHeader, addressLabel, addressField, addressJoin, myAddress] + ruleNotes as [NSView] { v.isHidden = !isOnline }
         let shown = isOnline ? shownProblem : nil
         problem.isHidden = shown == nil
-        fixButton.isHidden = shown == nil
+        // A firewall locked by a school / work profile can't be changed, so there's nothing to open.
+        fixButton.isHidden = shown == nil || (shown == .firewall && lan.firewallManaged)
         switch shown {
         case .localNetwork?:
             problem.text = "Bird Game isn't allowed on your local network, so it can't find friends. Turn Bird Game on in Privacy & Security › Local Network, then quit and reopen the game."
         case .firewall?:
-            problem.text = "Your Mac's firewall is blocking Bird Game, so friends can't join your games. In Network › Firewall › Options, set Bird Game to \u{201C}Allow incoming connections\u{201D}."
+            problem.text = lan.firewallManaged
+                ? "This Mac's firewall is managed (by a school or workplace), so friends can't join games you host on it. Joining still works: have a friend with a personal Mac host, then join their game."
+                : "Your Mac's firewall is blocking Bird Game, so friends can't join games you host. Allow it in Network › Firewall › Options (\u{201C}Allow incoming connections\u{201D}), or have a friend host. Joining still works."
         case nil: break
         }
         guard isOnline else {
@@ -662,7 +665,7 @@ final class LANPanel: FlippedView, NSTextFieldDelegate {
         let colW = (W - 32) / 2
         var top: CGFloat = status.isHidden ? 76 : 98
         if !problem.isHidden {
-            let pw = min(W - 170, 720)
+            let pw = fixButton.isHidden ? min(W, 880) : min(W - 170, 720)
             problem.frame = NSRect(x: 0, y: top - 10, width: pw, height: 36)
             fixButton.frame = NSRect(x: pw + 10, y: top - 16, width: 150, height: 44)
             top += 40

@@ -112,6 +112,9 @@ The first time you go online, macOS asks two questions. Click **Allow** for both
 
 The LAN tab warns you (with an **Open Settings** button) if either one is blocking you.
 
+**School or work Macs** often have firewall settings you can't change. Only the **host** needs to accept incoming
+connections: joining always works. So have a friend with a personal Mac host, and everyone else joins their game.
+
 If your friend's game doesn't show up in the list, the network may be hiding games from each other (common on
 mesh, school and guest Wi-Fi). The host's LAN tab shows their address (like `192.168.1.23`). Type it into
 **Join by the host's address** instead. Guest networks that keep devices apart can still block this, so try a

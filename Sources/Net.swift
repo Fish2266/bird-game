@@ -228,6 +228,8 @@ final class LANSession: NetLink {
     /// This Mac's address(es) on the network, for "join by address".
     private(set) var addresses: [String] = []
     private(set) var listeningPort: UInt16?
+    /// The firewall's settings are locked by the Mac's owner (school / work), so the player can't allow Bird Game.
+    private(set) var firewallManaged = false
     /// This game's chat, oldest first (cleared when you host or join another game).
     private(set) var chat: [ChatLine] = []
     var name = "Player"
@@ -1005,10 +1007,12 @@ final class LANSession: NetLink {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let addrs = LANSession.localAddresses()
             let blocked = LANSession.firewallBlocksUs()
+            let managed = blocked && LANSession.firewallIsManaged()
             DispatchQueue.main.async {
                 guard let self else { return }
-                let changed = addrs != self.addresses || blocked != self.problems.contains(.firewall)
+                let changed = addrs != self.addresses || blocked != self.problems.contains(.firewall) || managed != self.firewallManaged
                 self.addresses = addrs
+                self.firewallManaged = managed
                 if blocked { self.problems.insert(.firewall) } else { self.problems.remove(.firewall) }
                 if changed { self.onChange?() }
             }
@@ -1058,6 +1062,11 @@ final class LANSession: NetLink {
         return fw(["--getappblocked", exe]).contains("is blocked")
     }
 
+    /// A configuration profile (school, work) sets the firewall, so its options are locked in System Settings.
+    static func firewallIsManaged() -> Bool {
+        FileManager.default.fileExists(atPath: "/Library/Managed Preferences/com.apple.security.firewall.plist")
+    }
+
     static func openSettings(for p: Problem) {
         let url = p == .firewall ? "x-apple.systempreferences:com.apple.Network-Settings.extension?Firewall"
                                  : "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork"
@@ -1065,8 +1074,9 @@ final class LANSession: NetLink {
     }
 
     /// Test hook: pretend to be hosting a game with a few players and people nearby (UI snapshots).
-    func debugFill(hosting: Bool, problems: Set<Problem> = []) {
+    func debugFill(hosting: Bool, problems: Set<Problem> = [], managed: Bool = false) {
         role = hosting ? .hosting : .idle
+        firewallManaged = managed
         status = hosting ? "Hosting" : "Looking for games on your network…"
         self.problems = problems
         addresses = ["192.168.1.23"]

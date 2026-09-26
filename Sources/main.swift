@@ -71,7 +71,7 @@ if let i = args.firstIndex(of: "--menu-snapshot") {
         menu2.cacheDisplay(in: menu2.bounds, to: rep)
         try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: args[i + 1] + ".lan-idle.png"))
     }
-    fake.debugFill(hosting: true, problems: [.firewall])
+    fake.debugFill(hosting: false, problems: [.firewall], managed: true)
     menu2.lanChanged()
     menu2.layoutSubtreeIfNeeded()
     if let rep = menu2.bitmapImageRepForCachingDisplay(in: menu2.bounds) {
