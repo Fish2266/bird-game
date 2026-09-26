@@ -361,13 +361,16 @@ private final class LANRow: FlippedView {
     override func layout() {
         super.layout()
         let h = bounds.height
+        // Short rows (a full game, to leave room for chat): name only.
+        let compact = h < 40
         dot.frame = NSRect(x: 12, y: (h - 14) / 2, width: 14, height: 14)
-        let bw: CGFloat = 92
+        let bw: CGFloat = 92, bh = min(38, h - 2)
         var right = bounds.width - 6
-        if !b.isHidden { b.frame = NSRect(x: right - bw, y: (h - 38) / 2, width: bw, height: 38); right -= bw + 2 }
-        if !a.isHidden { a.frame = NSRect(x: right - bw, y: (h - 38) / 2, width: bw, height: 38); right -= bw + 2 }
-        title.frame = NSRect(x: 34, y: 6, width: right - 40, height: 18)
+        if !b.isHidden { b.frame = NSRect(x: right - bw, y: (h - bh) / 2, width: bw, height: bh); right -= bw + 2 }
+        if !a.isHidden { a.frame = NSRect(x: right - bw, y: (h - bh) / 2, width: bw, height: bh); right -= bw + 2 }
+        title.frame = NSRect(x: 34, y: compact ? (h - 18) / 2 : 6, width: right - 40, height: 18)
         sub.frame = NSRect(x: 34, y: 25, width: right - 40, height: 16)
+        sub.alphaValue = compact ? 0 : 1
     }
 }
 
@@ -408,6 +411,10 @@ final class LANPanel: FlippedView, NSTextFieldDelegate {
     private let addressField = WiiTextField(frame: .zero)
     private let addressJoin = WiiButton("Join", textSize: 14)
     private let myAddress = WiiLabel(13, color: Wii.textSoft)
+    private let chatHeader = WiiLabel(15, bold: true)
+    private let chatLines = ChatLinesView()
+    private let chatField = WiiTextField(frame: .zero)
+    private let chatSend = WiiButton("Send", textSize: 14)
     private var leftRows: [LANRow] = []
     private var rightRows: [LANRow] = []
     private var inviteRows: [LANRow] = []
@@ -426,6 +433,14 @@ final class LANPanel: FlippedView, NSTextFieldDelegate {
         addressField.target = self
         addressField.action = #selector(joinByAddress)
         addressJoin.onClick = { [weak self] in self?.joinByAddress() }
+        chatHeader.text = "Chat"
+        chatLines.onDark = false
+        chatLines.emptyText = "No messages yet. Say hi! (In the game, press T to chat.)"
+        chatField.placeholderAttributedString = NSAttributedString(string: "Message everyone",
+            attributes: [.foregroundColor: Wii.textSoft.withAlphaComponent(0.7), .font: Wii.font(15)])
+        chatField.target = self
+        chatField.action = #selector(sendChat)
+        chatSend.onClick = { [weak self] in self?.sendChat() }
         fixButton.onClick = { [weak self] in
             guard let self, let p = self.shownProblem else { return }
             LANSession.openSettings(for: p)
@@ -436,7 +451,7 @@ final class LANPanel: FlippedView, NSTextFieldDelegate {
         ruleNotes[2].text = "Everyone glows through walls, with a compass."
         for v in [nameLabel, nameField, colorLabel, colors, status, online, offlineInfo, leftHeader, rightHeader, hostButton, leaveButton,
                   collisions, pvp, showLocation, gameInfo, startRound, emptyLeft, emptyRight, inviteHeader, problem, fixButton,
-                  addressLabel, addressField, addressJoin, myAddress] + ruleNotes as [NSView] { addSubview(v) }
+                  addressLabel, addressField, addressJoin, myAddress, chatHeader, chatLines, chatField, chatSend] + ruleNotes as [NSView] { addSubview(v) }
         startRound.onClick = { [weak self] in self?.onStartRound?() }
         colors.onChange = { [weak self] i in self?.commitProfile(color: i) }
         online.onClick = { [weak self] in self?.onGoOnline?() }
@@ -449,6 +464,15 @@ final class LANPanel: FlippedView, NSTextFieldDelegate {
     // Name editing
     func controlTextDidEndEditing(_ obj: Notification) {
         if (obj.object as AnyObject?) === nameField { commitProfile(color: colors.selected) }
+    }
+
+    @objc private func sendChat() {
+        guard lan.say(chatField.stringValue) else { return }
+        chatField.stringValue = ""
+    }
+
+    func chatChanged() {
+        chatLines.entries = lan.chat.map { ChatLinesView.Entry(line: $0, at: Date()) }
     }
 
     @objc private func joinByAddress() {
@@ -505,6 +529,8 @@ final class LANPanel: FlippedView, NSTextFieldDelegate {
         leaveButton.isHidden = !inGame && role != .joining
         leaveButton.title = role == .hosting ? "Stop hosting" : role == .joining ? "Cancel" : "Leave game"
         for v in [addressLabel, addressField, addressJoin] as [NSView] { v.isHidden = inGame }
+        for v in [chatHeader, chatLines, chatField, chatSend] as [NSView] { v.isHidden = !inGame }
+        chatChanged()
         addressJoin.isEnabled = role == .idle
         myAddress.isHidden = role != .hosting || lan.addresses.isEmpty
         if let a = lan.addresses.first {
@@ -666,9 +692,24 @@ final class LANPanel: FlippedView, NSTextFieldDelegate {
             addressJoin.frame = NSRect(x: addressField.frame.maxX + 6, y: y + 18, width: 96, height: 44)
         }
         var ry = top + 28
-        for r in rightRows where !r.isHidden { r.frame = NSRect(x: colW + 32, y: ry, width: colW, height: 46); ry += 48 }
+        let shownRows = rightRows.filter { !$0.isHidden }
+        let bottom = H - 66
+        let addrH: CGFloat = myAddress.isHidden ? 0 : 46
+        // In a game the chat goes under the players; a full game shrinks the rows to make room.
+        var rowH: CGFloat = 46
+        if !chatField.isHidden && bottom - (ry + CGFloat(shownRows.count) * 48 + addrH) < 150 { rowH = 32 }
+        for r in shownRows { r.frame = NSRect(x: colW + 32, y: ry, width: colW, height: rowH); ry += rowH + 2 }
         emptyRight.frame = NSRect(x: colW + 32, y: ry, width: colW, height: 20)
         myAddress.frame = NSRect(x: colW + 32, y: ry + 10, width: colW, height: 36)
+        if !chatField.isHidden {
+            let cy = ry + addrH + 6
+            chatHeader.frame = NSRect(x: colW + 32, y: cy, width: colW, height: 22)
+            chatField.frame = NSRect(x: colW + 32, y: bottom - 38, width: colW - 104, height: 34)
+            chatSend.frame = NSRect(x: chatField.frame.maxX + 6, y: bottom - 43, width: 98, height: 44)
+            let linesTop = cy + 28
+            chatLines.frame = NSRect(x: colW + 32, y: linesTop, width: colW, height: max(0, bottom - 46 - linesTop))
+            chatLines.isHidden = chatLines.frame.height < 20
+        }
         hostButton.frame = NSRect(x: -5, y: H - 56, width: 240, height: 56)
         leaveButton.frame = NSRect(x: -5, y: H - 56, width: 240, height: 56)
         startRound.frame = NSRect(x: leaveButton.frame.maxX + 8, y: H - 56, width: 240, height: 56)

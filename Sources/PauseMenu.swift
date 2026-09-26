@@ -612,6 +612,8 @@ final class PauseMenuView: NSView {
         playPanel.refresh()
     }
 
+    func chatChanged() { lanPanel.chatChanged() }
+
     private func select(tab i: Int) {
         tab = i
         if i == 1 { lanPanel.refresh() }

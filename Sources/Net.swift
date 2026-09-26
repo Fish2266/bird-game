@@ -37,6 +37,25 @@ enum Wire: Codable {
     case bye
     /// Heartbeat, so a vanished player (Mac asleep, Wi-Fi gone) is noticed within seconds.
     case ping
+    case chat(ChatLine)
+}
+
+/// One chat message (or a "joined" / "left" note when `system`).
+struct ChatLine: Codable, Equatable {
+    var id: Int
+    var name: String
+    var color: Int
+    var text: String
+    var system = false
+
+    static let maxLength = 140
+    /// One line, trimmed, not too long; nil when there's nothing to say.
+    static func clean(_ raw: String) -> String? {
+        let one = raw.components(separatedBy: .newlines).joined(separator: " ")
+            .filter { !$0.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) } }
+            .trimmingCharacters(in: .whitespaces)
+        return one.isEmpty ? nil : String(one.prefix(maxLength))
+    }
 }
 
 extension GameEvent {
@@ -209,6 +228,8 @@ final class LANSession: NetLink {
     /// This Mac's address(es) on the network, for "join by address".
     private(set) var addresses: [String] = []
     private(set) var listeningPort: UInt16?
+    /// This game's chat, oldest first (cleared when you host or join another game).
+    private(set) var chat: [ChatLine] = []
     var name = "Player"
     var color = 0
     var bird = "gull"
@@ -223,6 +244,7 @@ final class LANSession: NetLink {
     /// Left a game (kicked, host gone, connection lost).
     var onEnded: ((String) -> Void)?
     var onPeerLeft: ((Int) -> Void)?
+    var onChat: ((ChatLine) -> Void)?
 
     // Network-queue state
     private var me = (name: "Player", color: 0, bird: "gull")
@@ -245,6 +267,8 @@ final class LANSession: NetLink {
     private var hostingQ = false
     private var lobbyQ = Lobby()
     private var activity: NSObjectProtocol?
+    /// Host: recent message times per player (spam guard).
+    private var chatTimes: [Int: [Double]] = [:]
 
     // NetLink (any thread, under `lock`)
     private var _localId = 1
@@ -517,6 +541,17 @@ final class LANSession: NetLink {
             if let d = Conn.frame(.event(e)) { for (cid, c) in clients where cid != id { c.send(frame: d) } }
             deliver(e)
             main { $0.onEvent?(id, e) }
+        case .chat(var l):
+            guard let info = clients[id]?.info, let text = ChatLine.clean(l.text) else { return }
+            // At most 6 messages in 5 seconds each.
+            let now = uptime()
+            var times = (chatTimes[id] ?? []).filter { now - $0 < 5 }
+            guard times.count < 6 else { return }
+            times.append(now)
+            chatTimes[id] = times
+            l = ChatLine(id: id, name: info.name, color: info.color, text: text)
+            if let d = Conn.frame(.chat(l)) { for (cid, c) in clients where cid != id { c.send(frame: d) } }
+            main { $0.received(l) }
         case .bye:
             clients[id]?.close()
         default: break
@@ -546,6 +581,7 @@ final class LANSession: NetLink {
         guard role == .idle else { return }
         role = .hosting
         status = "Hosting"
+        chat = []
         let me = PeerInfo(id: 1, name: name, color: color, bird: bird)
         lock.lock(); _localId = 1; box = NetInbox(); lock.unlock()
         q.async { [self] in
@@ -682,6 +718,7 @@ final class LANSession: NetLink {
                 self.main { s in
                     guard s.role == .joining else { return }
                     s.role = .joined
+                    s.chat = []
                     s.lobby = l
                     s.status = "In \(l.hostName)'s game"
                     s.keepAwake(true)
@@ -760,6 +797,8 @@ final class LANSession: NetLink {
             }
         case .match(let m):
             main { s in if s.role == .joined { s.onMatch?(m) } }
+        case .chat(let l):
+            main { s in if s.role == .joined { s.received(l) } }
         case .kicked:
             endJoined("The host removed you from the game.")
         case .bye:
@@ -853,6 +892,37 @@ final class LANSession: NetLink {
             sent = ok
             self?.q.asyncAfter(deadline: .now() + 1) { c.close() }
         }
+    }
+
+    // MARK: Chat
+
+    /// Send a message to everyone in the game. Returns false when there's no game (or nothing to say).
+    @discardableResult
+    func say(_ raw: String) -> Bool {
+        guard role == .hosting || role == .joined, let text = ChatLine.clean(raw) else { return false }
+        let line = ChatLine(id: localId, name: name, color: color, text: text)
+        received(line)
+        q.async { [self] in
+            if hostingQ {
+                guard let d = Conn.frame(.chat(line)) else { return }
+                for c in clients.values { c.send(frame: d) }
+            } else if welcomed {
+                server?.send(.chat(line))
+            }
+        }
+        return true
+    }
+
+    /// A note in the chat that only this game sees (e.g. "Alex joined").
+    func note(_ text: String) {
+        guard role == .hosting || role == .joined else { return }
+        received(ChatLine(id: 0, name: "", color: 0, text: text, system: true))
+    }
+
+    private func received(_ l: ChatLine) {
+        chat.append(l)
+        if chat.count > 60 { chat.removeFirst(chat.count - 60) }
+        onChat?(l)
     }
 
     // MARK: NetLink
@@ -1014,6 +1084,9 @@ final class LANSession: NetLink {
                                 DiscoveredGame(service: "h", hostName: "Morgan", color: 6, mode: .freeRoam, world: "meadow", players: 1,
                                                endpoint: ep, otherVersion: "0.2")]
         invites = hosting ? [] : [Invite(from: "Sam", color: 2, service: "s")]
+        chat = hosting ? [ChatLine(id: 0, name: "", color: 0, text: "Sam joined", system: true),
+                          ChatLine(id: 2, name: "Alex", color: 5, text: "ready when you are"),
+                          ChatLine(id: 1, name: name, color: color, text: "starting the race in a sec, get to the line!")] : []
     }
 
     /// Test hook: stop all network activity without saying goodbye (like a Mac going to sleep).

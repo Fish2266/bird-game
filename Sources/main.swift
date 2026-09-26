@@ -129,7 +129,16 @@ if let i = args.firstIndex(of: "--hud-snapshot") {
     hud.update(s, pose: nil, cameraName: "FaceTime HD Camera")
     hud.addFeed("Alex finished — 1:58.20")
     hud.addFeed("You knocked out Sam!")
+    let chat = ChatOverlay(frame: root.bounds)
+    root.addSubview(chat)
+    chat.bottomInset = hud.helpTop
+    chat.add(ChatLine(id: 0, name: "", color: 0, text: "Riley joined", system: true))
+    chat.add(ChatLine(id: 2, name: "Alex", color: 5, text: "gg that last ring was brutal"))
+    chat.add(ChatLine(id: 3, name: "Sam", color: 2, text: "wait for me at the start next round, I keep clipping the arch and ending up in the lava"))
     snap(".race.png")
+    chat.open()
+    snap(".chat.png")
+    chat.removeFromSuperview()
     // Single-player fight with results up.
     s.mode = .pvp; s.multiplayer = false; s.gateLabel = ""; s.place = nil; s.fighters = 4; s.fightersLeft = 2; s.ringDistance = 0
     s.banner = "Out of lives by Gustav — watching Pip   (← → to switch)"; s.alive = false; s.lives = 0

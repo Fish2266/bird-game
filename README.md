@@ -95,6 +95,9 @@ The host picks the mode and map in the Play tab (everyone switches with them) an
 - **PvP**: attacks work in every mode (in Free Roam and races you respawn after being knocked out).
 - **Show location**: everyone glows through walls, with a colored marker far away and a compass in the corner.
 
+**Chat**: press **T** in the game to type a message to everyone (Return sends, Esc closes); messages show at the
+bottom left for a few seconds. While paused, the LAN tab has the whole conversation and a box to reply.
+
 Everyone needs the **same version** of Bird Game. A friend on another version shows up in the list marked
 "Different version" instead of being hidden.
 
@@ -169,7 +172,7 @@ from there, so bump it in that one place. The app icon is `Resources/AppIcon.ico
 - `--dogfight-test` measures how often planes hit a bird flying straight.
 - `--render-test <dir> [seconds] [bird] [world] [mode]` with a mode (`ringRace`, `speedRace`, `pvp`) flies the course / fights the bots with a test pilot.
 - `--net-test` runs a host and three other copies in one process over real Bonjour/TCP (discovery, version check, join by
-  address, state relay, attacks, rounds, heartbeats and dropped players, invite, kick and ban).
+  address, state relay, attacks, rounds, chat, heartbeats and dropped players, invite, kick and ban).
   Set `BIRD_LOOPBACK=1` to keep it on loopback (a freshly signed build hasn't been granted Local Network access yet).
 - `--scenario-test` checks race and fight flows headless (countdown, pause, ghost, medals, off-course, lives, orbs, spectating).
 - `--pvp-sim [bird] [world] [seconds] [demo|chase]` plays a fight against the bots headless and prints a summary.

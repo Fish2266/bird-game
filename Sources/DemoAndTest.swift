@@ -536,6 +536,23 @@ enum NetTest {
         // Rules change
         host.updateLobby(rules: MatchRules(collisions: false, pvp: true, showLocation: false))
         wait("guest sees new host settings") { guest.lobby.rules.pvp && !guest.lobby.rules.collisions }
+        // Chat
+        host.say("  hi\nall  ")
+        wait("everyone gets the host's chat (one line, trimmed)") {
+            guest.chat.contains { $0.id == 1 && $0.name == "Hosty" && $0.text == "hi all" } && third.chat.contains { $0.text == "hi all" }
+        }
+        guest.say(String(repeating: "x", count: 500))
+        wait("a guest's message reaches the host and others, at most \(ChatLine.maxLength) characters") {
+            host.chat.contains { $0.id == 2 && $0.name == "Guesty" && $0.text.count == ChatLine.maxLength }
+                && third.chat.contains { $0.name == "Guesty" }
+        }
+        if guest.chat.filter({ $0.name == "Guesty" }).count != 1 || guest.say("   ") {
+            failures += 1; print("FAIL  own message shown once; blank ones not sent")
+        } else { print("PASS  own message shown once; blank ones not sent") }
+        for k in 0..<12 { third.say("spam \(k)") }
+        RunLoop.main.run(until: Date().addingTimeInterval(1))
+        let spam = host.chat.filter { $0.name == "Thirdy" }.count
+        if spam == 6 { print("PASS  spam guard lets 6 of 12 quick messages through") } else { failures += 1; print("FAIL  spam guard (\(spam) got through)") }
         // Quiet lobby: heartbeats keep everyone connected.
         RunLoop.main.run(until: Date().addingTimeInterval(LANSession.timeout + 2))
         wait("still connected after \(Int(LANSession.timeout + 2)) s with nothing to say") { guest.role == .joined && third.role == .joined && host.lobby.players.count == 3 }

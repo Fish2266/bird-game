@@ -34,6 +34,7 @@ final class GameSCNView: SCNView {
         case "f": window?.toggleFullScreen(nil)
         case "e": app?.attack()
         case "j": app?.acceptInvite()
+        case "t": app?.openChat()
         default: super.keyDown(with: e)
         }
     }
@@ -65,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
     let lan = LANSession()
     let director = MatchDirector()
     var pauseMenu: PauseMenuView!
+    var chatView: ChatOverlay!
     private(set) var isPaused = false
     private var pendingInvite: Invite?
     private var inviteHide: DispatchWorkItem?
@@ -116,6 +118,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         hud.autoresizingMask = [.width, .height]
         hud.alphaValue = hudOpacity
         window.contentView!.addSubview(hud)
+
+        chatView = ChatOverlay(frame: window.contentView!.bounds)
+        chatView.autoresizingMask = [.width, .height]
+        chatView.onSend = { [weak self] text in self?.lan.say(text) }
+        chatView.onClose = { [weak self] in
+            guard let self, !self.isPaused else { return }
+            self.window.makeFirstResponder(self.scnView)
+        }
+        window.contentView!.addSubview(chatView)
 
         pauseMenu = PauseMenuView(progress: progress, lan: lan)
         pauseMenu.frame = window.contentView!.bounds
@@ -207,7 +218,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
 
     func togglePause() {
         guard let game else { return }
+        chatView.close()
         isPaused.toggle()
+        chatView.isHidden = isPaused
         game.keys = KeyInput()
         game.paused = isPaused
         sound?.setMuted(isPaused || muted)
@@ -487,6 +500,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
 
     private func wireLAN() {
         lan.onChange = { [weak self] in self?.pauseMenu.lanChanged() }
+        lan.onChat = { [weak self] l in
+            self?.chatView.add(l)
+            self?.pauseMenu.chatChanged()
+        }
         lan.onLobby = { [weak self] l in self?.lobbyChanged(l) }
         lan.onMatch = { [weak self] m in self?.apply(m) }
         lan.onEvent = { [weak self] _, e in self?.directorEvent(e) }
@@ -507,6 +524,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         lan.onEnded = { [weak self] why in
             guard let self, !self.terminating else { return }
             self.knownPlayers = []
+            self.knownNames = [:]
+            self.chatView.close()
+            self.chatView.reset()
             if why.count < 40 { self.hud.showNotice(why) }
             self.hud.addFeed(why)
             let w = self.progress.world.kind ?? .meadow
@@ -517,6 +537,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
     }
 
     private var knownPlayers: Set<Int> = []
+    private var knownNames: [Int: String] = [:]
 
     /// The host changed the mode, map or settings (or someone joined / left).
     private func lobbyChanged(_ l: Lobby) {
@@ -524,8 +545,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         let ids = Set(l.players.map(\.id))
         for p in l.players where !knownPlayers.contains(p.id) && p.id != lan.localId && !knownPlayers.isEmpty {
             hud?.addFeed("\(p.name) joined")
+            lan.note("\(p.name) joined")
+        }
+        for id in knownPlayers where !ids.contains(id) && id != lan.localId {
+            if let n = knownNames[id] { lan.note("\(n) left") }
         }
         knownPlayers = ids
+        knownNames = Dictionary(l.players.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
         let world = WorldID(rawValue: l.world) ?? .meadow
         if game?.multiplayer != true || world != currentWorld || l.mode != currentMode {
             let g = makeGame(world, mode: l.mode)
@@ -593,7 +619,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         guard let inv = pendingInvite else { return }
         pendingInvite = nil
         hud.showInvite(nil)
-        if inMultiplayer { lan.leave() }
+        if inMultiplayer || lan.role == .joining { lan.leave() }
         lan.accept(inv)
     }
 
@@ -687,6 +713,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         hud.update(s, pose: shared.pose, cameraName: camera.device?.localizedName ?? "No camera")
         if lan.role == .hosting, let c = director.tick() { finishRound(c) }
         tickHiddenGame()
+        chatView.bottomInset = hud.helpTop
+        chatView.tick()
         hudTicks += 1
         if hudTicks % 90 == 0 {
             Log.write(String(format: "fps %.1f speed %.0f km/h alt %.0f rings %d tracking %d mode %@ players %d", s.fps, s.speedKmh, s.altitude,
@@ -701,6 +729,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
     func toggleHelp() { hud.showHelp.toggle() }
     func toggleMute() { muted.toggle(); sound?.setMuted(muted || isPaused) }
     func attack() { game?.keys.attack = true }
+
+    /// T: type a message to everyone in the LAN game.
+    func openChat() {
+        guard inMultiplayer, !isPaused else { return }
+        game?.keys = KeyInput()
+        chatView.open()
+    }
 
     /// N: respawn / race again / (host) start the next round.
     func restart() {

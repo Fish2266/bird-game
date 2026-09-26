@@ -192,6 +192,8 @@ final class HUDView: NSView {
     private var flyingTicks = 0
     private var helpAutoHidden = false
     var showHelp = false { didSet { helpBox.isHidden = !showHelp } }
+    /// Top of the help box when it's shown (things at the bottom left go above it).
+    var helpTop: CGFloat { showHelp ? helpBox.frame.maxY + 6 : 16 }
     var showPreview = true { didSet { preview?.isHidden = !showPreview } }
 
     override init(frame: NSRect) {
@@ -270,7 +272,7 @@ final class HUDView: NSView {
         Open your mouth wide to attack (in fights).
 
         Keys: ←→ bank, ↑↓ pitch, Space flap, Shift dive, Return attack
-        Esc pause, modes & shop · R recalibrate · H hide help
+        Esc pause, modes & shop · R recalibrate · H hide help · T chat
         """
         addSubview(gauge)
         addSubview(status)
