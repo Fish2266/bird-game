@@ -157,6 +157,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         if let i = a.firstIndex(of: "--auto-start"), i + 1 < a.count, let t = Double(a[i + 1]) {
             DispatchQueue.main.asyncAfter(deadline: .now() + t) { [weak self] in self?.hostStartRound() }
         }
+        // `--switch-mode-after <s> <mode>`: the host picks another mode (tests that everyone still sees each other).
+        if let i = a.firstIndex(of: "--switch-mode-after"), i + 2 < a.count, let t = Double(a[i + 1]), let m = GameMode(rawValue: a[i + 2]) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + t) { [weak self] in
+                guard let self else { return }
+                print("switching to \(m.rawValue)"); fflush(stdout)
+                self.play(m, self.currentWorld)
+            }
+        }
+        // `--net-report`: once a second, who this game can see.
+        if a.contains("--net-report") {
+            Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                let role = "\(self.lan.role)", lobby = self.lan.lobby.players.count
+                self.game?.enqueue { g in
+                    let seen = g.others.values.filter { !$0.idle && $0.lastHeard > 0 }.count
+                    print("net role=\(role) mode=\(g.mode.rawValue) phase=\(g.phase) lobby=\(lobby) others=\(g.others.count) moving=\(seen)")
+                    fflush(stdout)
+                }
+            }
+        }
         if let i = a.firstIndex(of: "--snapshot-after"), i + 2 < a.count, let t = Double(a[i + 1]) {
             let path = a[i + 2]
             DispatchQueue.main.asyncAfter(deadline: .now() + t) { [weak self] in
@@ -178,6 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationWillTerminate(_ notification: Notification) { terminating = true; lan.leave() }
+    func applicationDidBecomeActive(_ notification: Notification) { lan.refreshDiagnostics() }
     func applicationDidResignActive(_ notification: Notification) {
         if !isPaused && !CommandLine.arguments.contains("--no-autopause") { togglePause() }
     }
@@ -195,6 +216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
                                   cameras: CameraManager.availableDevices().map { ($0.uniqueID, $0.localizedName) },
                                   current: camera.device?.uniqueID)
             pauseMenu.setPlaying(mode: currentMode, world: currentWorld)
+            lan.refreshDiagnostics()
             pauseMenu.willShow()
             pauseMenu.isHidden = false
             hud.isHidden = true
@@ -317,7 +339,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
             g.link = lan
             g.localId = lan.localId
             g.rules = lan.lobby.rules
-            g.peers = lan.lobby.players
+            g.syncPeers(lan.lobby.players)
             g.slot = lan.lobby.players.firstIndex { $0.id == lan.localId } ?? 0
             if mode == .freeRoam { g.respawn() } else { g.enterWarmup() }
         } else if mode.isRace {
@@ -355,7 +377,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         case .hosting:
             director.stop()
             lan.updateLobby(mode: mode, world: world.rawValue, running: false)
-        case .joined:
+        case .joined, .joining:
             NSSound.beep()
             return
         default:
@@ -484,6 +506,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         }
         lan.onEnded = { [weak self] why in
             guard let self, !self.terminating else { return }
+            self.knownPlayers = []
             if why.count < 40 { self.hud.showNotice(why) }
             self.hud.addFeed(why)
             let w = self.progress.world.kind ?? .meadow
@@ -638,7 +661,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
     // MARK: Render loop
 
     func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
+        updateLock.lock()
+        lastRender = CACurrentMediaTime()
+        renderClockOffset = time - lastRender
         game?.update(time: time)
+        updateLock.unlock()
+    }
+
+    private let updateLock = NSLock()
+    private var lastRender = 0.0
+    /// SceneKit's clock minus CACurrentMediaTime, so hidden ticks continue the same timeline.
+    private var renderClockOffset = 0.0
+
+    /// In a LAN game the world goes on while this window is hidden (minimized, covered, screen asleep), when macOS
+    /// stops drawing it: keep the game ticking so your bird, clock and race stay in step with everyone else.
+    private func tickHiddenGame() {
+        guard inMultiplayer, CACurrentMediaTime() - lastRender > 0.25, updateLock.try() else { return }
+        game?.update(time: CACurrentMediaTime() + renderClockOffset)
+        updateLock.unlock()
     }
 
     private func refreshHUD() {
@@ -646,6 +686,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         let s = game.stats
         hud.update(s, pose: shared.pose, cameraName: camera.device?.localizedName ?? "No camera")
         if lan.role == .hosting, let c = director.tick() { finishRound(c) }
+        tickHiddenGame()
         hudTicks += 1
         if hudTicks % 90 == 0 {
             Log.write(String(format: "fps %.1f speed %.0f km/h alt %.0f rings %d tracking %d mode %@ players %d", s.fps, s.speedKmh, s.altitude,

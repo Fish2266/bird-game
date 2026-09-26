@@ -432,7 +432,7 @@ final class Game {
                 }
             }
             updatePaused(frameDt)
-            if multiplayer { updateOthers(dt: frameDt, now: time); publishState(dt: frameDt) }
+            if multiplayer { updateOthers(dt: frameDt, now: time); publishState(dt: frameDt, now: time) }
             return
         }
         elapsed += frameDt
@@ -603,7 +603,7 @@ final class Game {
         let agl = flight.pos.y - TerrainShape.ground(flight.pos.x, flight.pos.z)
         sound?.setFlight(speed: frozen ? 0 : flight.speed, tuck: input.tuck, stall: frozen ? 0 : flight.stalled, roll: flight.roll,
                          ground: smoothstep(28, 2, agl))
-        if multiplayer { publishState(dt: frameDt) }
+        if multiplayer { publishState(dt: frameDt, now: time) }
 
         // Publish HUD stats.
         let ground = TerrainShape.ground(flight.pos.x, flight.pos.z)

@@ -1,6 +1,7 @@
 import SceneKit
 import AppKit
 import simd
+import Network
 
 /// Synthesizes Vision-style keypoints for a scripted "player" so the whole
 /// pose → controls → flight pipeline can be exercised without a camera.
@@ -446,8 +447,9 @@ enum NetTest {
         let host = LANSession(); host.name = "Hosty"; host.color = 5
         let guest = LANSession(); guest.name = "Guesty"; guest.color = 2; guest.bird = "falcon"
         let other = LANSession(); other.name = "Invitee"; other.color = 7
-        var hostEvents: [GameEvent] = []
-        host.onEvent = { _, e in hostEvents.append(e) }
+        let third = LANSession(); third.name = "Thirdy"; third.color = 4
+        var hostEvents: [(Int, GameEvent)] = []
+        host.onEvent = { hostEvents.append(($0, $1)) }
         var guestMatch: [MatchCommand] = []
         guest.onMatch = { guestMatch.append($0) }
         var ended: String?
@@ -455,38 +457,66 @@ enum NetTest {
         var invite: Invite?
         other.onInvite = { invite = $0 }
 
-        host.goOnline(); guest.goOnline(); other.goOnline()
-        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        // A 0.2 game on the network (older protocol): shown, but marked as needing the same version.
+        var oldTXT = NWTXTRecord()
+        for (k, v) in ["n": "Oldie", "c": "1", "i": "OLD00000", "v": "3", "h": "1", "g": "1", "m": "freeRoam", "w": "meadow", "p": "1"] { oldTXT[k] = v }
+        let oldParams = NWParameters.tcp; oldParams.requiredInterfaceType = .loopback
+        let oldHost = try? NWListener(using: oldParams)
+        oldHost?.service = NWListener.Service(name: "Oldie · OLD00000", type: LANSession.serviceType, domain: nil, txtRecord: oldTXT)
+        oldHost?.newConnectionHandler = { $0.cancel() }
+        oldHost?.start(queue: .main)
+
+        host.goOnline()
+        wait("host listens on the fixed port \(LANSession.port)") { host.listeningPort == LANSession.port }
+        guest.goOnline(); other.goOnline(); third.goOnline()
+        wait("other copies on the same Mac fall back to other ports") { [guest, other, third].allSatisfy { ($0.listeningPort ?? LANSession.port) != LANSession.port } }
         host.host(mode: .ringRace, world: "volcano", rules: MatchRules(collisions: true, pvp: false, showLocation: true))
-        wait("guest discovers the hosted game") { guest.games.contains { $0.hostName == "Hosty" } }
-        wait("host sees the others online") { host.nearby.count >= 2 }
+        wait("guest discovers the hosted game") { guest.games.contains { $0.hostName == "Hosty" && $0.otherVersion == nil } }
+        wait("guest sees the 0.2 game marked as a different version") { guest.games.contains { $0.hostName == "Oldie" && $0.otherVersion == "0.2" } }
+        if let old = guest.games.first(where: { $0.hostName == "Oldie" }) {
+            guest.join(old)
+            print("      trying to join it: \(guest.status)")
+            if guest.role != .idle { failures += 1; print("FAIL  joining a different version is refused") }
+        }
+        wait("host sees the others online") { host.nearby.filter { $0.otherVersion == nil }.count >= 3 }
         if let g = guest.games.first(where: { $0.hostName == "Hosty" }) {
             print("      found: \(g.hostName) · \(g.mode.title) · \(g.world) · \(g.players) player(s)")
             guest.join(g)
         }
         wait("guest joined with id 2 and sees both players") { guest.role == .joined && guest.localId == 2 && guest.lobby.players.count == 2 }
-        print("      guest status: \(guest.status) role \(guest.role) host status: \(host.status)")
         wait("host lobby lists the guest (falcon)") { host.lobby.players.contains { $0.name == "Guesty" && $0.bird == "falcon" } }
-        print("      guest lobby: mode \(guest.lobby.mode.rawValue), world \(guest.lobby.world), pvp \(guest.lobby.rules.pvp)")
+        wait("the host's advertised player count updates without restarting") { third.games.first { $0.hostName == "Hosty" }?.players == 2 }
+        // Join by typing the address.
+        print("      host addresses: \(host.addresses)")
+        third.join(address: "127.0.0.1:\(LANSession.port)")
+        wait("third player joins by address (127.0.0.1)") { third.role == .joined && third.lobby.players.count == 3 }
+        if LANSession.endpoint("hello world") != nil || LANSession.endpoint("192.168.1.23") == nil || LANSession.endpoint("mac.local:1234") == nil {
+            failures += 1; print("FAIL  address parsing")
+        } else { print("PASS  address parsing") }
 
-        // States both ways
-        func st(_ id: Int, _ x: Float) -> NetState {
+        // States: each one reaches the others exactly once, in order.
+        func st(_ id: Int, _ x: Float, _ t: Double = 0) -> NetState {
             NetState(id: id, p: SIMD3(x, 50, 0), q: simd_quatf(angle: 0, axis: kUp).vector, v: SIMD3(0, 0, -20),
-                     w: SIMD4(0.1, 0.1, 0, 0), hp: 100, flags: NetState.alive, bird: "gull")
+                     w: SIMD4(0.1, 0.1, 0, 0), hp: 100, flags: NetState.alive, bird: "gull", t: t)
         }
-        var gotAtGuest: [NetState] = [], gotAtHost: [NetState] = []
-        wait("guest receives the host's flight state") {
-            host.send(state: st(1, 11)); guest.send(state: st(99, 22))
-            gotAtGuest += guest.drain().states; gotAtHost += host.drain().states
-            return gotAtGuest.contains { $0.id == 1 && $0.p.x == 11 }
+        _ = guest.drain(); _ = third.drain(); _ = host.drain()
+        for k in 0..<30 { guest.send(state: st(99, Float(k), Double(k) / 30)); host.send(state: st(1, 100 + Float(k))) }
+        var atThird: [NetState] = [], atGuest: [NetState] = [], atHost: [NetState] = []
+        wait("third gets all 30 of the guest's states, once each, in order") {
+            atThird += third.drain().states; atGuest += guest.drain().states; atHost += host.drain().states
+            let g = atThird.filter { $0.id == 2 }.map(\.p.x)
+            return g == (0..<30).map(Float.init)
         }
-        wait("host receives the guest's state (id forced to 2)") {
-            guest.send(state: st(99, 22)); gotAtHost += host.drain().states
-            return gotAtHost.contains { $0.id == 2 && $0.p.x == 22 }
+        wait("guest gets the host's states and never its own") {
+            atGuest += guest.drain().states
+            return atGuest.filter { $0.id == 1 }.count == 30 && !atGuest.contains { $0.id == 2 }
         }
+        wait("host gets the guest's states (id forced to 2)") { atHost += host.drain().states; return atHost.filter { $0.id == 2 }.count == 30 }
         // Events
-        guest.send(event: .finished(id: 2, time: 99.5))
-        wait("host gets the guest's finish event") { hostEvents.contains { if case .finished(2, _) = $0 { return true }; return false } }
+        guest.send(event: .finished(id: 1, time: 99.5))
+        wait("host gets the guest's finish, credited to the guest even if it claims another id") {
+            hostEvents.contains { if $0.0 == 2, case .finished(2, _) = $0.1 { return true }; return false }
+        }
         var guestEvents: [GameEvent] = []
         let shot = Shot(owner: 1, weapon: .missiles, attack: 7, origin: .zero, dir: SIMD3(0, 0, -1), ownerVel: .zero, target: 2)
         host.send(event: .fire(shot))
@@ -497,7 +527,7 @@ enum NetTest {
         host.broadcast(start)
         wait("guest gets the round start") { guestMatch.contains { if case .start = $0 { return true }; return false } }
         _ = director.handle(.finished(id: 1, time: 101.2))
-        // (fights end on .eliminated, races on .finished)
+        _ = director.handle(.finished(id: 3, time: 120))
         if let res = director.handle(.finished(id: 2, time: 99.5)), case .results(_, let standings) = res {
             print("PASS  director ends the race when everyone finishes: " + standings.map { "\($0.place). \($0.name) \($0.time.map(raceClock) ?? "-")" }.joined(separator: ", "))
             host.broadcast(res)
@@ -506,15 +536,39 @@ enum NetTest {
         // Rules change
         host.updateLobby(rules: MatchRules(collisions: false, pvp: true, showLocation: false))
         wait("guest sees new host settings") { guest.lobby.rules.pvp && !guest.lobby.rules.collisions }
+        // Quiet lobby: heartbeats keep everyone connected.
+        RunLoop.main.run(until: Date().addingTimeInterval(LANSession.timeout + 2))
+        wait("still connected after \(Int(LANSession.timeout + 2)) s with nothing to say") { guest.role == .joined && third.role == .joined && host.lobby.players.count == 3 }
         // Invite
         if let p = host.nearby.first(where: { $0.name == "Invitee" }) { host.invite(p) }
         wait("invitee gets an invite from Hosty") { invite?.from == "Hosty" }
+        if let inv = invite { other.accept(inv) }
+        wait("invitee accepts and joins") { other.role == .joined && host.lobby.players.count == 4 }
+        other.leave()
+        wait("leaving frees the slot") { host.lobby.players.count == 3 && other.role == .idle }
+        // A player whose Mac goes to sleep (no goodbye): the host notices within the timeout.
+        if let g = other.games.first(where: { $0.hostName == "Hosty" }) { other.join(g) }
+        wait("invitee joins again") { other.role == .joined && host.lobby.players.count == 4 }
+        other.debugGoSilent()
+        let silentAt = Date()
+        wait("host drops a player who went silent", LANSession.timeout + 5) { host.lobby.players.count == 3 }
+        print(String(format: "      dropped after %.1f s", Date().timeIntervalSince(silentAt)))
         // Kick
         host.kick(2)
         wait("kicked guest is told and leaves") { ended != nil && guest.role == .idle }
         print("      guest was told: \(ended ?? "-")")
-        wait("host lobby drops the guest") { host.lobby.players.count == 1 }
-        host.leave(); guest.leave(); other.leave()
+        wait("host lobby drops the guest") { host.lobby.players.count == 2 }
+        if let g = guest.games.first(where: { $0.hostName == "Hosty" }) { guest.join(g) }
+        wait("a kicked player can't rejoin") { guest.role == .idle && guest.status.contains("removed") }
+        print("      rejoin said: \(guest.status)")
+        // Host leaves: everyone is told.
+        var thirdEnded: String?
+        third.onEnded = { thirdEnded = $0 }
+        host.leave()
+        wait("when the host stops, players are told") { third.role == .idle && thirdEnded != nil }
+        print("      third was told: \(thirdEnded ?? "-")")
+        guest.leave(); third.leave()
+        oldHost?.cancel()
         print(failures == 0 ? "ALL PASSED" : "\(failures) FAILED")
     }
 }

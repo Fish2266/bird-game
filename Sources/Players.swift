@@ -134,9 +134,29 @@ final class OtherBird {
 
     // MARK: Network interpolation
 
+    /// Receiver clock minus sender clock (the quickest delivery seen, following drift slowly), and recent lateness.
+    private var offset: Double?
+    private var jitter: Double = 0.02
+    /// No flight state received yet.
+    var idle: Bool { snaps.isEmpty }
+
     func push(_ s: NetState, at t: Double) {
-        snaps.append((t, s))
-        if snaps.count > 12 { snaps.removeFirst(snaps.count - 12) }
+        // States carry the sender's clock, so they replay at the pace they were taken, whenever they arrive.
+        let st = s.t > 0 ? s.t : t
+        if let last = snaps.last {
+            if st < last.t - 2 { snaps.removeAll(); offset = nil }   // their clock restarted (new game)
+            else if st <= last.t { return }                           // nothing new
+        }
+        let o = t - st
+        if let cur = offset {
+            let next = o < cur ? o : cur + (o - cur) * 0.02
+            offset = next
+            jitter = max(o - next, jitter * 0.97)
+        } else {
+            offset = o
+        }
+        snaps.append((st, s))
+        if snaps.count > 20 { snaps.removeFirst(snaps.count - 20) }
         lastHeard = t
         flags = s.flags
         hp = s.hp
@@ -144,10 +164,12 @@ final class OtherBird {
         setSpecies(s.bird)
     }
 
-    /// Show the network bird ~100 ms in the past, blending between the two states around that time.
+    /// Show the network bird a little in the past (just enough to cover the network's hiccups),
+    /// blending between the two states around that time.
     func interpolate(now: Double) {
         guard let last = snaps.last else { return }
-        let rt = now - 0.1
+        let delay = clamp(0.045 + jitter * 1.5, 0.06, 0.3)
+        let rt = now - (offset ?? 0) - delay
         var a = snaps[0], b = last
         if rt <= snaps[0].t {
             a = snaps[0]; b = snaps[0]

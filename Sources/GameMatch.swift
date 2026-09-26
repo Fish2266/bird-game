@@ -661,26 +661,30 @@ extension Game {
     func tickNetwork(dt: Float, now: Double) {
         guard let link else { return }
         let inbox = link.drain()
-        if let p = inbox.peers {
-            peers = p
-            let ids = Set(p.map(\.id))
-            for (id, o) in others where !ids.contains(id) {
-                o.root.removeFromParentNode()
-                others.removeValue(forKey: id)
-            }
-            for info in p where info.id != localId {
-                if let o = others[info.id] {
-                    o.setIdentity(name: info.name, color: info.color)
-                } else {
-                    let o = OtherBird(id: info.id, name: info.name, color: info.color, species: info.bird)
-                    others[info.id] = o
-                    othersRoot.addChildNode(o.root)
-                }
-            }
-        }
+        if let p = inbox.peers { syncPeers(p) }
         if let r = inbox.rules { rules = r }
         for s in inbox.states where s.id != localId { others[s.id]?.push(s, at: now) }
         for e in inbox.events { handle(e) }
+    }
+
+    /// Match the other birds to the lobby's player list (who's here, names, colors, birds).
+    func syncPeers(_ p: [PeerInfo]) {
+        peers = p
+        let ids = Set(p.map(\.id))
+        for (id, o) in others where !ids.contains(id) || id == localId {
+            o.root.removeFromParentNode()
+            others.removeValue(forKey: id)
+        }
+        for info in p where info.id != localId {
+            if let o = others[info.id] {
+                o.setIdentity(name: info.name, color: info.color)
+                if o.idle { o.setSpecies(info.bird) }
+            } else {
+                let o = OtherBird(id: info.id, name: info.name, color: info.color, species: info.bird)
+                others[info.id] = o
+                othersRoot.addChildNode(o.root)
+            }
+        }
     }
 
     private func handle(_ e: GameEvent) {
@@ -722,10 +726,11 @@ extension Game {
         for b in bots { b.avatar.updateVisuals(camera: cam, dt: dt, showLocation: showLoc, showHealth: showHealth) }
     }
 
-    func publishState(dt: Float) {
+    func publishState(dt: Float, now: Double) {
+        // 30 a second, evenly (keeping the remainder, so 60 fps sends every other frame instead of drifting to 20).
         stateTimer += dt
-        guard stateTimer >= 1.0 / 30.0, let link else { return }
-        stateTimer = 0
+        guard stateTimer >= 1.0 / 30.0 - 0.002, let link else { return }
+        stateTimer = min(stateTimer - 1.0 / 30.0, 1.0 / 30.0)
         var f = 0
         if fighter.alive && participating { f |= NetState.alive }
         if paused { f |= NetState.paused }
@@ -734,7 +739,7 @@ extension Game {
         if fighter.burnTime > 0 { f |= NetState.burning }
         let prog = Float(nextGate) + (finishTime != nil ? 1 : 0) + (track.map { progressS / max($0.length, 1) } ?? 0) * 0.001
         link.send(state: NetState(id: localId, p: flight.pos, q: flight.orientation.vector, v: flight.velocity, w: wingState,
-                                  hp: fighter.health, flags: f, bird: species.id, progress: prog, lives: fighter.lives))
+                                  hp: fighter.health, flags: f, bird: species.id, progress: prog, lives: fighter.lives, t: now))
     }
 
     // MARK: HUD

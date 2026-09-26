@@ -160,8 +160,10 @@ final class TerrainManager {
 
     var loadedCount: Int { chunks.count }
 
-    /// Tileable grey speckle/blotch texture multiplied over the vertex colors.
-    static func detailTexture() -> CGImage {
+    /// Tileable grey speckle/blotch texture multiplied over the vertex colors (always the same, so made once).
+    static func detailTexture() -> CGImage { detail }
+    private static let detail = makeDetailTexture()
+    private static func makeDetailTexture() -> CGImage {
         let n = 256
         var rng = SplitMix64(seed: 5150)
         func blurred(_ radius: Int, _ passes: Int) -> [Float] {

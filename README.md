@@ -95,8 +95,26 @@ The host picks the mode and map in the Play tab (everyone switches with them) an
 - **PvP**: attacks work in every mode (in Free Roam and races you respawn after being knocked out).
 - **Show location**: everyone glows through walls, with a colored marker far away and a compass in the corner.
 
-macOS asks to allow **Local Network** access the first time you go online — allow it, or other players can't reach you
-(System Settings › Privacy & Security › Local Network).
+Everyone needs the **same version** of Bird Game. A friend on another version shows up in the list marked
+"Different version" instead of being hidden.
+
+### Can't connect?
+
+The first time you go online, macOS asks two questions. Click **Allow** for both:
+
+1. **Find devices on your local network?** Without this, Bird Game can't see anyone
+   (System Settings › Privacy & Security › Local Network).
+2. **Accept incoming network connections?** Without this, nobody can join games you host
+   (System Settings › Network › Firewall › Options).
+
+The LAN tab warns you (with an **Open Settings** button) if either one is blocking you.
+
+If your friend's game doesn't show up in the list, the network may be hiding games from each other (common on
+mesh, school and guest Wi-Fi). The host's LAN tab shows their address (like `192.168.1.23`). Type it into
+**Join by the host's address** instead. Guest networks that keep devices apart can still block this, so try a
+home network or a phone hotspot that you're all connected to.
+
+If someone's Mac sleeps or leaves the Wi-Fi, the others notice within about 8 seconds and carry on without them.
 
 ## Birds
 
@@ -150,10 +168,12 @@ from there, so bump it in that one place. The app icon is `Resources/AppIcon.ico
 - `--render-test <dir> [seconds] [bird] [world]` renders frames offscreen and prints flight telemetry.
 - `--dogfight-test` measures how often planes hit a bird flying straight.
 - `--render-test <dir> [seconds] [bird] [world] [mode]` with a mode (`ringRace`, `speedRace`, `pvp`) flies the course / fights the bots with a test pilot.
-- `--net-test` runs a host and two guests in one process over real Bonjour/TCP (join, sync, attacks, rounds, invite, kick).
+- `--net-test` runs a host and three other copies in one process over real Bonjour/TCP (discovery, version check, join by
+  address, state relay, attacks, rounds, heartbeats and dropped players, invite, kick and ban).
   Set `BIRD_LOOPBACK=1` to keep it on loopback (a freshly signed build hasn't been granted Local Network access yet).
 - `--scenario-test` checks race and fight flows headless (countdown, pause, ghost, medals, off-course, lives, orbs, spectating).
 - `--pvp-sim [bird] [world] [seconds] [demo|chase]` plays a fight against the bots headless and prints a summary.
 - `--gallery <dir> [world]` renders every race gate and obstacle for checking looks.
 - `--demo --no-autopause --host-lan ringRace --auto-start 8` and `--demo --no-autopause --join-lan` run a LAN game between two copies on one Mac.
+  Add `--net-report` to print who each copy can see every second, and `--switch-mode-after <s> <mode>` to have the host change mode.
 - `--audio-test <file.wav>`, `--menu-snapshot <file.png>`, `--hud-snapshot <file.png>` check sound and UI offscreen.

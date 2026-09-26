@@ -93,6 +93,8 @@ struct NetState: Codable {
     /// Race progress (gates passed + fraction) for live standings.
     var progress: Float = 0
     var lives = Fighter.startLives
+    /// The sender's clock (seconds) when this state was taken, so others can replay it at an even pace.
+    var t: Double = 0
 
     static let alive = 1, paused = 2, finished = 4, spectator = 8, burning = 16
 }

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Network
 
@@ -34,11 +35,28 @@ enum Wire: Codable {
     case event(GameEvent)
     case match(MatchCommand)
     case bye
+    /// Heartbeat, so a vanished player (Mac asleep, Wi-Fi gone) is noticed within seconds.
+    case ping
+}
+
+extension GameEvent {
+    /// The same event with its player ids forced to the sender's (a client can only speak for itself).
+    func from(_ id: Int) -> GameEvent {
+        switch self {
+        case .fire(var s): s.owner = id; return .fire(s)
+        case .hit(var h): h.from = id; return .hit(h)
+        case .died(_, let killer): return .died(victim: id, killer: killer)
+        case .finished(_, let time): return .finished(id: id, time: time)
+        case .respawned: return .respawned(id: id)
+        case .eliminated: return .eliminated(id: id)
+        case .pickup(let orb, _): return .pickup(orb: orb, by: id)
+        }
+    }
 }
 
 /// A game someone is hosting on the local network.
 struct DiscoveredGame: Equatable {
-    /// The host's instance id (stable, unlike the Bonjour service name).
+    /// The host's instance id (stable, unlike the Bonjour service name). Empty for a game joined by address.
     var service: String
     var hostName: String
     var color: Int
@@ -46,6 +64,8 @@ struct DiscoveredGame: Equatable {
     var world: String
     var players: Int
     var endpoint: NWEndpoint
+    /// The host's app version when it can't play with ours (nil = compatible).
+    var otherVersion: String? = nil
 }
 
 /// Another Bird Game on the network (for invites).
@@ -56,6 +76,7 @@ struct DiscoveredPeer: Equatable {
     var color: Int
     var inGame: Bool
     var endpoint: NWEndpoint
+    var otherVersion: String? = nil
 }
 
 struct Invite: Equatable {
@@ -64,6 +85,8 @@ struct Invite: Equatable {
     var service: String
 }
 
+private func uptime() -> Double { ProcessInfo.processInfo.systemUptime }
+
 // MARK: - Connection
 
 /// One TCP connection carrying length-prefixed JSON messages.
@@ -71,8 +94,14 @@ private final class Conn {
     let c: NWConnection
     var id = 0
     var info: PeerInfo?
+    /// The other game's instance id (from its hello).
+    var instance = ""
     var onMessage: ((Wire) -> Void)?
     var onClose: (() -> Void)?
+    /// Network queue: when we last heard anything, and when the connection was made.
+    private(set) var lastHeard = uptime()
+    let opened = uptime()
+    private var ready = false
     private var closed = false
     private static let encoder = JSONEncoder()
     private static let decoder = JSONDecoder()
@@ -82,6 +111,9 @@ private final class Conn {
     func start(on q: DispatchQueue) {
         c.stateUpdateHandler = { [weak self] st in
             switch st {
+            case .ready: self?.ready = true
+            // Before it connects, "waiting" means the other side can't be reached right now: give up and let the caller retry.
+            case .waiting: if self?.ready == false { self?.finish() }
             case .failed, .cancelled: self?.finish()
             default: break
             }
@@ -90,12 +122,23 @@ private final class Conn {
         receive()
     }
 
-    func send(_ w: Wire, then: (() -> Void)? = nil) {
-        guard !closed, let body = try? Conn.encoder.encode(w) else { return }
+    /// A message framed for sending (encode once, send to many).
+    static func frame(_ w: Wire) -> Data? {
+        guard let body = try? encoder.encode(w) else { return nil }
         var len = UInt32(body.count).bigEndian
         var d = Data(bytes: &len, count: 4)
         d.append(body)
-        c.send(content: d, completion: .contentProcessed { _ in then?() })
+        return d
+    }
+
+    func send(_ w: Wire, then: ((Bool) -> Void)? = nil) {
+        guard let d = Conn.frame(w) else { return }
+        send(frame: d, then: then)
+    }
+
+    func send(frame d: Data, then: ((Bool) -> Void)? = nil) {
+        guard !closed else { then?(false); return }
+        c.send(content: d, completion: .contentProcessed { err in then?(err == nil) })
     }
 
     private func receive() {
@@ -106,6 +149,7 @@ private final class Conn {
             guard len > 0, len < 4_000_000 else { self.finish(); return }
             self.c.receive(minimumIncompleteLength: len, maximumLength: len) { body, _, done2, err2 in
                 guard err2 == nil, let body, body.count == len else { self.finish(); return }
+                self.lastHeard = uptime()
                 if let w = try? Conn.decoder.decode(Wire.self, from: body) { self.onMessage?(w) }
                 if done2 { self.finish() } else { self.receive() }
             }
@@ -132,10 +176,22 @@ private final class Conn {
 /// Each player flies their own bird; the shooter decides what their attacks hit.
 final class LANSession: NetLink {
     static let serviceType = "_birdgame._tcp"
-    static let protocolVersion = 3
+    static let protocolVersion = 4
     static let maxPlayers = 8
+    /// Fixed port, so friends can also join by typing the host's address (falls back to any free port).
+    static let port: UInt16 = 47474
+    /// Silence for this long means the other side is gone.
+    static let timeout: Double = 8
 
-    enum Role: Equatable { case offline, idle, hosting, joined }
+    enum Role: Equatable { case offline, idle, joining, hosting, joined }
+
+    /// Something on this Mac that stops friends from reaching us.
+    enum Problem: Equatable {
+        /// macOS Local Network permission was turned off for Bird Game.
+        case localNetwork
+        /// The macOS firewall blocks incoming connections to Bird Game (friends can't join our games).
+        case firewall
+    }
 
     let instance = String(UUID().uuidString.prefix(8))
     private let q = DispatchQueue(label: "bird.net")
@@ -149,6 +205,10 @@ final class LANSession: NetLink {
     private(set) var invited: Set<String> = []
     private(set) var lobby = Lobby()
     private(set) var status = ""
+    private(set) var problems: Set<Problem> = []
+    /// This Mac's address(es) on the network, for "join by address".
+    private(set) var addresses: [String] = []
+    private(set) var listeningPort: UInt16?
     var name = "Player"
     var color = 0
     var bird = "gull"
@@ -165,17 +225,26 @@ final class LANSession: NetLink {
     var onPeerLeft: ((Int) -> Void)?
 
     // Network-queue state
+    private var me = (name: "Player", color: 0, bird: "gull")
     private var listener: NWListener?
     private var browser: NWBrowser?
     private var serviceName = ""
+    private var advertised: [String: String] = [:]
+    private var advertiseQueued = false
+    private var endpoints: [String: NWEndpoint] = [:]
     private var clients: [Int: Conn] = [:]
     private var pending: [ObjectIdentifier: Conn] = [:]
+    private var banned: Set<String> = []
     private var nextId = 2
     private var server: Conn?
+    private var welcomed = false
     private var latest: [Int: NetState] = [:]
+    private var outbox: [NetState] = []
     private var relayTimer: DispatchSourceTimer?
+    private var heartbeat: DispatchSourceTimer?
     private var hostingQ = false
     private var lobbyQ = Lobby()
+    private var activity: NSObjectProtocol?
 
     // NetLink (any thread, under `lock`)
     private var _localId = 1
@@ -187,11 +256,14 @@ final class LANSession: NetLink {
         tcp.noDelay = true
         tcp.connectionTimeout = 5
         let p = NWParameters(tls: nil, tcp: tcp)
+        // Also finds Macs nearby over Apple's peer-to-peer Wi-Fi (helps on networks that keep devices apart).
         p.includePeerToPeer = true
         // Tests on one Mac: stay on loopback (no Local Network permission needed).
         if ProcessInfo.processInfo.environment["BIRD_LOOPBACK"] != nil { p.requiredInterfaceType = .loopback }
         return p
     }
+
+    private static var appVersion: String { AppVersion.short }
 
     // MARK: Presence
 
@@ -200,69 +272,127 @@ final class LANSession: NetLink {
         guard role == .offline else { return }
         role = .idle
         status = "Looking for games on your network…"
+        let profile = (name, color, bird)
         q.async { [self] in
-            serviceName = "\(name) · \(instance)"
-            startListener()
-            let b = NWBrowser(for: .bonjourWithTXTRecord(type: LANSession.serviceType, domain: nil), using: LANSession.params())
-            b.browseResultsChangedHandler = { [weak self] results, _ in self?.discovered(results) }
-            b.start(queue: q)
-            browser = b
+            me = profile
+            serviceName = "\(profile.0.prefix(30)) · \(instance)"
+            startListener(fixedPort: true)
+            startBrowser()
+            startHeartbeat()
         }
+        refreshDiagnostics()
         onChange?()
     }
 
     /// TXT record: who we are and what we're hosting.
     private func txt() -> NWTXTRecord {
         var t = NWTXTRecord()
-        t["n"] = name
-        t["c"] = String(color)
+        t["n"] = me.name
+        t["c"] = String(me.color)
         t["i"] = instance
         t["v"] = String(LANSession.protocolVersion)
+        t["a"] = LANSession.appVersion
         t["h"] = hostingQ ? "1" : "0"
         t["g"] = hostingQ || server != nil ? "1" : "0"
-        t["m"] = lobbyQ.mode.rawValue
-        t["w"] = lobbyQ.world
-        t["p"] = String(lobbyQ.players.count)
+        if hostingQ {
+            t["m"] = lobbyQ.mode.rawValue
+            t["w"] = lobbyQ.world
+            t["p"] = String(lobbyQ.players.count)
+        }
         return t
     }
 
-    /// One listener takes joins and invites and advertises us with Bonjour.
-    private func startListener() {
+    /// One long-lived listener takes joins and invites and advertises us with Bonjour.
+    private func startListener(fixedPort: Bool) {
+        let l: NWListener
         do {
-            let l = try NWListener(using: LANSession.params())
-            l.service = NWListener.Service(name: serviceName, type: LANSession.serviceType, domain: nil, txtRecord: txt())
-            l.newConnectionHandler = { [weak self] c in self?.accept(c) }
-            l.stateUpdateHandler = { [weak self] st in
-                if case .failed(let e) = st { self?.main { $0.status = "Network error: \(e.localizedDescription)" } }
-            }
-            l.start(queue: q)
-            listener = l
+            l = fixedPort ? try NWListener(using: LANSession.params(), on: NWEndpoint.Port(rawValue: LANSession.port)!)
+                          : try NWListener(using: LANSession.params())
         } catch {
-            main { $0.status = "Couldn't start networking: \(error.localizedDescription)" }
+            if fixedPort { startListener(fixedPort: false) } else { main { $0.setStatus("Couldn't start networking: \(error.localizedDescription)") } }
+            return
         }
+        let t = txt()
+        advertised = t.dictionary
+        l.service = NWListener.Service(name: serviceName, type: LANSession.serviceType, domain: nil, txtRecord: t)
+        l.newConnectionHandler = { [weak self] c in self?.accept(c) }
+        l.stateUpdateHandler = { [weak self, weak l] st in
+            guard let self, let l, self.listener === l else { return }
+            switch st {
+            case .ready:
+                let p = l.port?.rawValue
+                self.main { $0.listeningPort = p; $0.onChange?() }
+            case .waiting(let e):
+                if LANSession.isPolicyDenied(e) { self.main { $0.flag(.localNetwork, true) } }
+            case .failed(let e):
+                l.cancel()
+                self.listener = nil
+                if fixedPort {
+                    // The port is taken (another copy of the game on this Mac): any free port works for Bonjour.
+                    self.startListener(fixedPort: false)
+                } else {
+                    self.main { $0.setStatus("Network error: \(e.localizedDescription)") }
+                    self.q.asyncAfter(deadline: .now() + 3) { [weak self] in
+                        guard let self, self.listener == nil, self.browser != nil else { return }
+                        self.startListener(fixedPort: false)
+                    }
+                }
+            default: break
+            }
+        }
+        l.start(queue: q)
+        listener = l
     }
 
-    private var readvertiseQueued = false
+    private func startBrowser() {
+        let b = NWBrowser(for: .bonjourWithTXTRecord(type: LANSession.serviceType, domain: nil), using: LANSession.params())
+        b.browseResultsChangedHandler = { [weak self] results, _ in self?.discovered(results) }
+        b.stateUpdateHandler = { [weak self, weak b] st in
+            guard let self, let b, self.browser === b else { return }
+            switch st {
+            case .ready:
+                self.main { $0.flag(.localNetwork, false) }
+            case .waiting(let e):
+                if LANSession.isPolicyDenied(e) { self.main { $0.flag(.localNetwork, true) } }
+            case .failed:
+                // Restart (e.g. after the network changed).
+                b.cancel()
+                self.q.asyncAfter(deadline: .now() + 2) { [weak self] in
+                    guard let self, self.browser === b else { return }
+                    self.startBrowser()
+                }
+            default: break
+            }
+        }
+        b.start(queue: q)
+        browser = b
+    }
 
-    /// Publish a new TXT record. A running listener can't change its record, so it's replaced (connections it
-    /// already accepted stay open). Batched so a burst of lobby changes re-registers once.
+    /// macOS said no to local network access.
+    private static func isPolicyDenied(_ e: NWError) -> Bool {
+        if case .dns(let code) = e { return code == -65570 }   // kDNSServiceErr_PolicyDenied
+        return false
+    }
+
+    /// Publish a new TXT record when what we'd advertise changed (the listener keeps running and keeps its port).
     private func readvertise() {
-        guard listener != nil, !readvertiseQueued else { return }
-        readvertiseQueued = true
-        q.asyncAfter(deadline: .now() + 0.25) { [self] in
-            readvertiseQueued = false
-            guard let old = listener else { return }
-            old.newConnectionHandler = nil
-            old.stateUpdateHandler = nil
-            old.cancel()
-            startListener()
+        guard listener != nil, !advertiseQueued else { return }
+        advertiseQueued = true
+        q.asyncAfter(deadline: .now() + 0.15) { [self] in
+            advertiseQueued = false
+            guard let l = listener else { return }
+            let t = txt()
+            guard t.dictionary != advertised else { return }
+            advertised = t.dictionary
+            l.service = NWListener.Service(name: serviceName, type: LANSession.serviceType, domain: nil, txtRecord: t)
         }
     }
 
-    /// Name or color changed.
+    /// Name, color or bird changed.
     func updateProfile() {
         let (n, c, b) = (name, color, bird)
         q.async { [self] in
+            me = (n, c, b)
             readvertise()
             if hostingQ, let i = lobbyQ.players.firstIndex(where: { $0.id == 1 }) {
                 lobbyQ.players[i].name = n; lobbyQ.players[i].color = c; lobbyQ.players[i].bird = b
@@ -273,25 +403,51 @@ final class LANSession: NetLink {
     }
 
     private func discovered(_ results: Set<NWBrowser.Result>) {
-        var g: [DiscoveredGame] = [], p: [DiscoveredPeer] = []
+        var g: [String: DiscoveredGame] = [:], p: [String: DiscoveredPeer] = [:]
+        var eps: [String: NWEndpoint] = [:]
         for r in results {
-            guard case .service = r.endpoint, case .bonjour(let t) = r.metadata, let svc = t["i"] else { continue }
-            guard svc != instance, t["v"] == String(LANSession.protocolVersion) else { continue }
+            guard case .service = r.endpoint, case .bonjour(let t) = r.metadata, let svc = t["i"], svc != instance else { continue }
+            eps[svc] = r.endpoint
+            // 0.2 didn't advertise its app version.
+            let other: String? = t["v"] == String(LANSession.protocolVersion) ? nil : (t["a"] ?? (t["v"] == "3" ? "0.2" : "another version"))
             let n = t["n"] ?? "Player", c = Int(t["c"] ?? "0") ?? 0
             if t["h"] == "1" {
-                g.append(DiscoveredGame(service: svc, hostName: n, color: c, mode: GameMode(rawValue: t["m"] ?? "") ?? .freeRoam,
-                                        world: t["w"] ?? "meadow", players: Int(t["p"] ?? "1") ?? 1, endpoint: r.endpoint))
+                g[svc] = DiscoveredGame(service: svc, hostName: n, color: c, mode: GameMode(rawValue: t["m"] ?? "") ?? .freeRoam,
+                                        world: t["w"] ?? "meadow", players: Int(t["p"] ?? "1") ?? 1, endpoint: r.endpoint, otherVersion: other)
             }
-            p.append(DiscoveredPeer(service: svc, name: n, color: c, inGame: t["g"] == "1", endpoint: r.endpoint))
+            p[svc] = DiscoveredPeer(service: svc, name: n, color: c, inGame: t["g"] == "1", endpoint: r.endpoint, otherVersion: other)
         }
-        g.sort { $0.hostName < $1.hostName }
-        p.sort { $0.name < $1.name }
+        endpoints = eps
+        let games = g.values.sorted { ($0.otherVersion == nil ? 0 : 1, $0.hostName) < ($1.otherVersion == nil ? 0 : 1, $1.hostName) }
+        let peers = p.values.sorted { $0.name < $1.name }
         main { s in
-            s.games = g
-            s.nearby = p
-            s.invites.removeAll { inv in !p.contains { $0.service == inv.service } }
+            s.games = games
+            s.nearby = peers
+            s.invites.removeAll { inv in !peers.contains { $0.service == inv.service } }
             s.onChange?()
         }
+    }
+
+    // MARK: Heartbeat
+
+    private func startHeartbeat() {
+        let t = DispatchSource.makeTimerSource(queue: q)
+        t.schedule(deadline: .now() + 1, repeating: 1)
+        t.setEventHandler { [weak self] in self?.beat() }
+        t.resume()
+        heartbeat = t
+    }
+
+    private func beat() {
+        let now = uptime()
+        for c in clients.values {
+            if now - c.lastHeard > LANSession.timeout { c.close() } else { c.send(.ping) }
+        }
+        if let s = server, welcomed {
+            if now - s.lastHeard > LANSession.timeout { s.close() } else { s.send(.ping) }
+        }
+        // Connections that never said hello (or an invite that was never sent).
+        for c in pending.values where now - c.opened > 10 { c.close() }
     }
 
     // MARK: Incoming connections (joins and invites)
@@ -306,7 +462,7 @@ final class LANSession: NetLink {
             switch w {
             case .hello(let h): self.pending.removeValue(forKey: key); self.admit(conn, h)
             case .invite(let from, let color, let service):
-                let inv = Invite(from: from, color: color, service: service)
+                let inv = Invite(from: String(from.prefix(20)), color: color, service: service)
                 self.main { s in
                     guard s.role == .idle, !s.invites.contains(inv) else { return }
                     s.invites.append(inv)
@@ -321,13 +477,22 @@ final class LANSession: NetLink {
     }
 
     private func admit(_ conn: Conn, _ h: Hello) {
-        guard hostingQ else { conn.send(.reject("That game has ended.")) { conn.close() }; return }
-        guard h.version == LANSession.protocolVersion else { conn.send(.reject("Different game version — update Bird Game.")) { conn.close() }; return }
-        guard clients.count + 1 < LANSession.maxPlayers else { conn.send(.reject("That game is full.")) { conn.close() }; return }
+        func reject(_ why: String) { conn.send(.reject(why)) { _ in conn.close() } }
+        guard hostingQ else { reject("That game has ended."); return }
+        guard h.version == LANSession.protocolVersion else {
+            reject("That game is on a different version of Bird Game (you both need \(LANSession.appVersion)).")
+            return
+        }
+        guard !banned.contains(h.instance) else { reject("The host removed you from this game."); return }
+        guard clients.count + 1 < LANSession.maxPlayers else { reject("That game is full."); return }
+        // The same game reconnecting (e.g. after a Wi-Fi blip): drop its old connection first.
+        if let old = clients.first(where: { $0.value.instance == h.instance }) { old.value.close() }
         let id = nextId
         nextId += 1
         conn.id = id
-        conn.info = PeerInfo(id: id, name: String(h.name.prefix(20)), color: h.color, bird: h.bird)
+        conn.instance = h.instance
+        let n = h.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        conn.info = PeerInfo(id: id, name: String((n.isEmpty ? "Player" : n).prefix(20)), color: h.color, bird: h.bird)
         clients[id] = conn
         conn.onMessage = { [weak self] w in self?.fromClient(id, w) }
         conn.onClose = { [weak self] in self?.dropClient(id) }
@@ -341,14 +506,16 @@ final class LANSession: NetLink {
         case .state(var s):
             s.id = id
             latest[id] = s
-            lock.lock(); box.states.append(s); lock.unlock()
+            outbox.append(s)
+            deliver([s])
             if let i = lobbyQ.players.firstIndex(where: { $0.id == id }), lobbyQ.players[i].bird != s.bird {
                 lobbyQ.players[i].bird = s.bird
                 pushLobby()
             }
-        case .event(let e):
-            for (cid, c) in clients where cid != id { c.send(.event(e)) }
-            lock.lock(); box.events.append(e); lock.unlock()
+        case .event(let raw):
+            let e = raw.from(id)
+            if let d = Conn.frame(.event(e)) { for (cid, c) in clients where cid != id { c.send(frame: d) } }
+            deliver(e)
             main { $0.onEvent?(id, e) }
         case .bye:
             clients[id]?.close()
@@ -367,7 +534,7 @@ final class LANSession: NetLink {
     /// Host: send the lobby to everyone and to our own game.
     private func pushLobby() {
         let l = lobbyQ
-        for c in clients.values { c.send(.lobby(l)) }
+        if let d = Conn.frame(.lobby(l)) { for c in clients.values { c.send(frame: d) } }
         lock.lock(); box.peers = l.players; box.rules = l.rules; lock.unlock()
         readvertise()
         main { s in s.lobby = l; s.onLobby?(l); s.onChange?() }
@@ -385,10 +552,14 @@ final class LANSession: NetLink {
             hostingQ = true
             nextId = 2
             latest = [:]
+            outbox = []
+            banned = []
             lobbyQ = Lobby(hostName: me.name, players: [me], rules: rules, mode: mode, world: world, running: false)
             startRelay()
             pushLobby()
         }
+        keepAwake(true)
+        refreshDiagnostics()
         onChange?()
     }
 
@@ -406,13 +577,18 @@ final class LANSession: NetLink {
 
     /// Host: tell every client (the host applies commands to its own game itself).
     func broadcast(_ m: MatchCommand) {
-        q.async { [self] in for c in clients.values { c.send(.match(m)) } }
+        q.async { [self] in
+            guard let d = Conn.frame(.match(m)) else { return }
+            for c in clients.values { c.send(frame: d) }
+        }
     }
 
+    /// Host: remove a player. They can't rejoin this game.
     func kick(_ id: Int) {
         q.async { [self] in
             guard let c = clients[id] else { return }
-            c.send(.kicked) { c.close() }
+            if !c.instance.isEmpty { banned.insert(c.instance) }
+            c.send(.kicked) { _ in c.close() }
             q.asyncAfter(deadline: .now() + 0.5) { c.close() }
         }
     }
@@ -424,16 +600,17 @@ final class LANSession: NetLink {
         return v
     }
 
+    /// Every state received since the last tick goes out to everyone, 60 times a second, encoded once.
+    /// (Each game skips its own.) Nothing is dropped or sent twice, so other birds move smoothly.
     private func startRelay() {
         let t = DispatchSource.makeTimerSource(queue: q)
-        t.schedule(deadline: .now(), repeating: 1.0 / 30.0)
+        t.schedule(deadline: .now(), repeating: 1.0 / 60.0, leeway: .milliseconds(2))
         t.setEventHandler { [weak self] in
-            guard let self, self.hostingQ else { return }
-            let all = Array(self.latest.values)
-            for (id, c) in self.clients {
-                let others = all.filter { $0.id != id }
-                if !others.isEmpty { c.send(.states(others)) }
-            }
+            guard let self, self.hostingQ, !self.outbox.isEmpty else { return }
+            let batch = self.outbox
+            self.outbox.removeAll(keepingCapacity: true)
+            guard !self.clients.isEmpty, let d = Conn.frame(.states(batch)) else { return }
+            for c in self.clients.values { c.send(frame: d) }
         }
         t.resume()
         relayTimer = t
@@ -443,72 +620,122 @@ final class LANSession: NetLink {
 
     func join(_ g: DiscoveredGame) {
         guard role == .idle else { return }
-        role = .joined
+        if let v = g.otherVersion {
+            status = "\(g.hostName) has Bird Game \(v) and you have \(LANSession.appVersion). You both need the same version to play together."
+            onChange?()
+            return
+        }
+        role = .joining
         status = "Joining \(g.hostName)…"
         invites.removeAll { $0.service == g.service }
         onChange?()
         let hello = Hello(name: name, color: color, bird: bird, version: LANSession.protocolVersion, instance: instance)
-        let deadline = Date().addingTimeInterval(8)
+        let deadline = uptime() + 9
         q.async { [self] in connect(g, hello: hello, deadline: deadline) }
     }
 
-    /// One attempt at reaching the host; retried for a few seconds (the host may be re-advertising).
-    private func connect(_ g: DiscoveredGame, hello: Hello, deadline: Date) {
-        do {
-            let conn = Conn(NWConnection(to: g.endpoint, using: LANSession.params()))
-            server = conn
-            var welcomed = false
-            conn.onMessage = { [weak self] w in
-                guard let self else { return }
-                switch w {
-                case .welcome(let id, let l):
-                    welcomed = true
-                    self.lock.lock(); self._localId = id; self.box = NetInbox(); self.box.peers = l.players; self.box.rules = l.rules
-                    self.lock.unlock()
-                    self.lobbyQ = l
-                    self.readvertise()
-                    self.main { s in s.lobby = l; s.status = "In \(l.hostName)'s game"; s.onLobby?(l); s.onChange?() }
-                case .reject(let why):
-                    welcomed = true
-                    self.endJoined(why)
-                default:
-                    self.fromHost(w)
+    /// Join by typing the host's address (for networks where games don't show up by themselves).
+    /// Accepts "192.168.1.23", "192.168.1.23:47474" or a name like "Connors-MacBook.local".
+    @discardableResult
+    func join(address raw: String) -> Bool {
+        guard let ep = LANSession.endpoint(raw) else {
+            status = "That doesn't look like an address — it should look like 192.168.1.23"
+            onChange?()
+            return false
+        }
+        join(DiscoveredGame(service: "", hostName: raw.trimmingCharacters(in: .whitespaces), color: 0, mode: .freeRoam,
+                            world: "meadow", players: 1, endpoint: ep))
+        return true
+    }
+
+    static func endpoint(_ raw: String) -> NWEndpoint? {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty, !s.contains(" ") else { return nil }
+        var port = LANSession.port
+        // "host:port" (but not a bare IPv6 address)
+        if s.filter({ $0 == ":" }).count == 1, let i = s.lastIndex(of: ":") {
+            guard let p = UInt16(s[s.index(after: i)...]) else { return nil }
+            port = p
+            s = String(s[..<i])
+        }
+        s = s.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        guard !s.isEmpty, s.allSatisfy({ $0.isLetter || $0.isNumber || ".-:%".contains($0) }) else { return nil }
+        return .hostPort(host: NWEndpoint.Host(s), port: NWEndpoint.Port(rawValue: port)!)
+    }
+
+    /// One attempt at reaching the host; retried until the deadline (Wi-Fi hiccups, the host still starting up).
+    private func connect(_ g: DiscoveredGame, hello: Hello, deadline: Double) {
+        // A Bonjour game may have moved (new address or interface): use the freshest endpoint.
+        let ep = g.service.isEmpty ? g.endpoint : (endpoints[g.service] ?? g.endpoint)
+        let conn = Conn(NWConnection(to: ep, using: LANSession.params()))
+        server = conn
+        welcomed = false
+        conn.onMessage = { [weak self, weak conn] w in
+            guard let self, let conn, self.server === conn else { return }
+            switch w {
+            case .welcome(let id, let l):
+                self.welcomed = true
+                self.lock.lock(); self._localId = id; self.box = NetInbox(); self.box.peers = l.players; self.box.rules = l.rules
+                self.lock.unlock()
+                self.lobbyQ = l
+                self.readvertise()
+                self.main { s in
+                    guard s.role == .joining else { return }
+                    s.role = .joined
+                    s.lobby = l
+                    s.status = "In \(l.hostName)'s game"
+                    s.keepAwake(true)
+                    s.onLobby?(l)
+                    s.onChange?()
                 }
-            }
-            conn.onClose = { [weak self] in
-                guard let self, self.server === conn else { return }
-                if !welcomed && Date() < deadline {
-                    self.q.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-                        guard let self, self.server === conn else { return }
-                        self.connect(g, hello: hello, deadline: deadline)
-                    }
-                    return
-                }
-                self.endJoined(welcomed ? "Lost connection to the host."
-                               : "Couldn't reach that game. Check that Bird Game is allowed in System Settings › Privacy & Security › Local Network.")
-            }
-            conn.start(on: q)
-            conn.send(.hello(hello))
-            q.asyncAfter(deadline: .now() + 3) { [weak self] in
-                guard let self, !welcomed, self.server === conn else { return }
-                if Date() < deadline { conn.close() } else { self.endJoined("That game didn't answer.") }
+            case .reject(let why):
+                self.endJoined(why)
+            default:
+                self.fromHost(w)
             }
         }
+        conn.onClose = { [weak self] in
+            guard let self, self.server === conn else { return }
+            if !self.welcomed && uptime() < deadline {
+                self.q.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    guard let self, self.server === conn else { return }
+                    self.connect(g, hello: hello, deadline: deadline)
+                }
+                return
+            }
+            self.endJoined(self.welcomed ? "Lost connection to the host." : LANSession.unreachable(g))
+        }
+        conn.start(on: q)
+        conn.send(.hello(hello))
+        q.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self, !self.welcomed, self.server === conn else { return }
+            if uptime() < deadline { conn.close() } else { self.endJoined(LANSession.unreachable(g)) }
+        }
+    }
+
+    private static func unreachable(_ g: DiscoveredGame) -> String {
+        g.service.isEmpty
+            ? "Couldn't reach \(g.hostName). Check the address, and that the host's firewall lets Bird Game in."
+            : "Couldn't reach \(g.hostName)'s game. The host's Mac may be blocking it — their LAN tab says how to fix it."
     }
 
     /// Accept an invite: join the inviting host's game once it's been found on the network.
     func accept(_ inv: Invite) {
         invites.removeAll { $0 == inv }
-        if let g = games.first(where: { $0.service == inv.service }) { join(g); return }
         status = "Looking for \(inv.from)'s game…"
         onChange?()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            guard let self, self.role == .idle else { return }
-            if let g = self.games.first(where: { $0.service == inv.service }) { self.join(g) } else {
-                self.status = "Couldn't find \(inv.from)'s game."
-                self.onChange?()
+        let give = Date().addingTimeInterval(6)
+        func attempt() {
+            guard role == .idle else { return }
+            if let g = games.first(where: { $0.service == inv.service }) { join(g); return }
+            guard Date() < give else {
+                status = "Couldn't find \(inv.from)'s game. Maybe they stopped hosting."
+                onChange?()
+                return
             }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { attempt() }
         }
+        attempt()
     }
 
     func dismiss(_ inv: Invite) { invites.removeAll { $0 == inv }; onChange?() }
@@ -516,16 +743,23 @@ final class LANSession: NetLink {
     private func fromHost(_ w: Wire) {
         switch w {
         case .states(let ss):
-            lock.lock(); box.states += ss; lock.unlock()
+            let mine = localId
+            let others = ss.filter { $0.id != mine }
+            guard !others.isEmpty else { return }
+            deliver(others)
+        case .state(let s):
+            deliver([s])
         case .event(let e):
-            lock.lock(); box.events.append(e); lock.unlock()
+            deliver(e)
         case .lobby(let l):
             lobbyQ = l
             lock.lock(); box.peers = l.players; box.rules = l.rules; lock.unlock()
-            readvertise()
-            main { s in s.lobby = l; s.onLobby?(l); s.onChange?() }
+            main { s in
+                guard s.role == .joined else { return }
+                s.lobby = l; s.onLobby?(l); s.onChange?()
+            }
         case .match(let m):
-            main { $0.onMatch?(m) }
+            main { s in if s.role == .joined { s.onMatch?(m) } }
         case .kicked:
             endJoined("The host removed you from the game.")
         case .bye:
@@ -536,32 +770,39 @@ final class LANSession: NetLink {
 
     private func endJoined(_ why: String) {
         guard let s = server else { return }
+        let wasIn = welcomed
         server = nil
+        welcomed = false
         s.onClose = nil
         s.close()
         lobbyQ = Lobby()
         readvertise()
+        lock.lock(); _localId = 1; box = NetInbox(); lock.unlock()
         main { m in
-            guard m.role == .joined else { return }
+            guard m.role == .joined || m.role == .joining else { return }
             m.role = .idle
             m.lobby = Lobby()
             m.status = why
-            m.onEnded?(why)
+            m.keepAwake(false)
+            // A join that never got in leaves your own game alone.
+            if wasIn { m.onEnded?(why) }
             m.onChange?()
         }
     }
 
     // MARK: Leaving
 
-    /// Leave the game (client) or end it for everyone (host).
+    /// Leave the game (client), stop trying to join, or end the game for everyone (host).
     func leave() {
         switch role {
-        case .joined:
+        case .joined, .joining:
             q.async { [self] in
                 guard let s = server else { return }
                 server = nil
+                welcomed = false
                 s.onClose = nil
-                s.send(.bye) { s.close() }
+                s.send(.bye) { _ in s.close() }
+                q.asyncAfter(deadline: .now() + 0.5) { s.close() }
                 lobbyQ = Lobby()
                 readvertise()
             }
@@ -572,10 +813,11 @@ final class LANSession: NetLink {
                 relayTimer = nil
                 for c in clients.values {
                     c.onClose = nil
-                    c.send(.bye) { c.close() }
+                    c.send(.bye) { _ in c.close() }
                 }
                 clients.removeAll()
                 latest.removeAll()
+                outbox.removeAll()
                 lobbyQ = Lobby()
                 readvertise()
             }
@@ -585,20 +827,31 @@ final class LANSession: NetLink {
         role = .idle
         lobby = Lobby()
         status = ""
+        keepAwake(false)
         lock.lock(); _localId = 1; box = NetInbox(); lock.unlock()
-        onEnded?(was == .hosting ? "You stopped hosting." : "You left the game.")
+        if was != .joining { onEnded?(was == .hosting ? "You stopped hosting." : "You left the game.") }
         onChange?()
     }
 
     func invite(_ p: DiscoveredPeer) {
-        guard role == .hosting else { return }
+        guard role == .hosting, p.otherVersion == nil else { return }
         invited.insert(p.service)
         onChange?()
         let msg = Wire.invite(from: name, color: color, service: instance)
-        q.async {
-            let c = Conn(NWConnection(to: p.endpoint, using: LANSession.params()))
-            c.start(on: self.q)
-            c.send(msg) { self.q.asyncAfter(deadline: .now() + 1) { c.close() } }
+        q.async { [self] in sendInvite(msg, to: p.service, fallback: p.endpoint, tries: 3) }
+    }
+
+    private func sendInvite(_ msg: Wire, to service: String, fallback: NWEndpoint, tries: Int) {
+        let c = Conn(NWConnection(to: endpoints[service] ?? fallback, using: LANSession.params()))
+        var sent = false
+        c.onClose = { [weak self] in
+            guard !sent, tries > 1 else { return }
+            self?.q.asyncAfter(deadline: .now() + 1) { self?.sendInvite(msg, to: service, fallback: fallback, tries: tries - 1) }
+        }
+        c.start(on: q)
+        c.send(msg) { [weak self] ok in
+            sent = ok
+            self?.q.asyncAfter(deadline: .now() + 1) { c.close() }
         }
     }
 
@@ -608,7 +861,8 @@ final class LANSession: NetLink {
         q.async { [self] in
             if hostingQ {
                 latest[1] = state
-            } else {
+                outbox.append(state)
+            } else if welcomed {
                 server?.send(.state(state))
             }
         }
@@ -617,11 +871,32 @@ final class LANSession: NetLink {
     func send(event: GameEvent) {
         q.async { [self] in
             if hostingQ {
-                for c in clients.values { c.send(.event(event)) }
-            } else {
+                guard let d = Conn.frame(.event(event)) else { return }
+                for c in clients.values { c.send(frame: d) }
+            } else if welcomed {
                 server?.send(.event(event))
             }
         }
+    }
+
+    /// Hand states to the game. If the game isn't picking them up (window hidden and nothing ticking),
+    /// keep only the newest so memory stays flat and nothing floods in later.
+    private func deliver(_ ss: [NetState]) {
+        lock.lock()
+        box.states += ss
+        if box.states.count > 480 { box.states.removeFirst(box.states.count - 240) }
+        lock.unlock()
+    }
+
+    private func deliver(_ e: GameEvent) {
+        lock.lock()
+        box.events.append(e)
+        if box.events.count > 300 {
+            // Old attack effects don't matter any more; hits, knock-outs and finishes do.
+            box.events.removeAll { if case .fire = $0 { return true }; return false }
+            if box.events.count > 300 { box.events.removeFirst(box.events.count - 300) }
+        }
+        lock.unlock()
     }
 
     func drain() -> NetInbox {
@@ -631,10 +906,101 @@ final class LANSession: NetLink {
         return b
     }
 
+    // MARK: This Mac
+
+    /// Keep the game running at full speed while others depend on it, even when it's in the background
+    /// (otherwise macOS App Nap slows the host down and everyone stutters).
+    private func keepAwake(_ on: Bool) {
+        if on, activity == nil {
+            activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+                                                             reason: "Playing a LAN game")
+        } else if !on, let a = activity {
+            ProcessInfo.processInfo.endActivity(a)
+            activity = nil
+        }
+    }
+
+    private func setStatus(_ s: String) { status = s; onChange?() }
+
+    private func flag(_ p: Problem, _ on: Bool) {
+        let had = problems.contains(p)
+        guard had != on else { return }
+        if on { problems.insert(p) } else { problems.remove(p) }
+        onChange?()
+    }
+
+    /// Look up this Mac's addresses and whether the firewall lets friends in (runs in the background).
+    func refreshDiagnostics() {
+        guard role != .offline else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let addrs = LANSession.localAddresses()
+            let blocked = LANSession.firewallBlocksUs()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let changed = addrs != self.addresses || blocked != self.problems.contains(.firewall)
+                self.addresses = addrs
+                if blocked { self.problems.insert(.firewall) } else { self.problems.remove(.firewall) }
+                if changed { self.onChange?() }
+            }
+        }
+    }
+
+    /// IPv4 addresses on active network interfaces (Wi-Fi / Ethernet), most likely first.
+    static func localAddresses() -> [String] {
+        var list: [(String, String)] = []
+        var ifa: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifa) == 0, let first = ifa else { return [] }
+        defer { freeifaddrs(ifa) }
+        var p: UnsafeMutablePointer<ifaddrs>? = first
+        while let cur = p {
+            defer { p = cur.pointee.ifa_next }
+            let flags = Int32(cur.pointee.ifa_flags)
+            guard let sa = cur.pointee.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET),
+                  flags & IFF_UP != 0, flags & IFF_RUNNING != 0, flags & IFF_LOOPBACK == 0 else { continue }
+            let ifName = String(cString: cur.pointee.ifa_name)
+            guard ifName.hasPrefix("en") || ifName.hasPrefix("bridge") else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 else { continue }
+            let ip = String(cString: host)
+            guard !ip.hasPrefix("169.254.") else { continue }
+            list.append((ifName, ip))
+        }
+        return list.sorted { $0.0 < $1.0 }.map(\.1)
+    }
+
+    /// True when the macOS firewall is on and blocks incoming connections to this app (or everything).
+    static func firewallBlocksUs() -> Bool {
+        func fw(_ args: [String]) -> String {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/libexec/ApplicationFirewall/socketfilterfw")
+            p.arguments = args
+            let out = Pipe()
+            p.standardOutput = out
+            p.standardError = Pipe()
+            guard (try? p.run()) != nil else { return "" }
+            let d = out.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            return String(decoding: d, as: UTF8.self).lowercased()
+        }
+        guard fw(["--getglobalstate"]).contains("enabled") else { return false }
+        if fw(["--getblockall"]).contains("enabled") { return true }
+        guard let exe = Bundle.main.executablePath else { return false }
+        return fw(["--getappblocked", exe]).contains("is blocked")
+    }
+
+    static func openSettings(for p: Problem) {
+        let url = p == .firewall ? "x-apple.systempreferences:com.apple.Network-Settings.extension?Firewall"
+                                 : "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork"
+        if let u = URL(string: url) { NSWorkspace.shared.open(u) }
+    }
+
     /// Test hook: pretend to be hosting a game with a few players and people nearby (UI snapshots).
-    func debugFill(hosting: Bool) {
+    func debugFill(hosting: Bool, problems: Set<Problem> = []) {
         role = hosting ? .hosting : .idle
         status = hosting ? "Hosting" : "Looking for games on your network…"
+        self.problems = problems
+        addresses = ["192.168.1.23"]
+        listeningPort = LANSession.port
         lobby = Lobby(hostName: name, players: [PeerInfo(id: 1, name: name, color: color, bird: "eagle"),
                                                  PeerInfo(id: 2, name: "Alex", color: 5, bird: "falcon"),
                                                  PeerInfo(id: 3, name: "Sam", color: 2, bird: "sparrow")],
@@ -644,9 +1010,14 @@ final class LANSession: NetLink {
         nearby = [DiscoveredPeer(service: "a", name: "Riley", color: 7, inGame: false, endpoint: ep),
                   DiscoveredPeer(service: "b", name: "Jordan", color: 3, inGame: false, endpoint: ep)]
         invited = ["b"]
-        games = hosting ? [] : [DiscoveredGame(service: "g", hostName: "Alex", color: 5, mode: .pvp, world: "caves", players: 3, endpoint: ep)]
+        games = hosting ? [] : [DiscoveredGame(service: "g", hostName: "Alex", color: 5, mode: .pvp, world: "caves", players: 3, endpoint: ep),
+                                DiscoveredGame(service: "h", hostName: "Morgan", color: 6, mode: .freeRoam, world: "meadow", players: 1,
+                                               endpoint: ep, otherVersion: "0.2")]
         invites = hosting ? [] : [Invite(from: "Sam", color: 2, service: "s")]
     }
+
+    /// Test hook: stop all network activity without saying goodbye (like a Mac going to sleep).
+    func debugGoSilent() { q.suspend() }
 
     private func main(_ f: @escaping (LANSession) -> Void) {
         DispatchQueue.main.async { [weak self] in if let self { f(self) } }
@@ -691,14 +1062,14 @@ final class MatchDirector {
         guard running else { return nil }
         switch e {
         case .finished(let id, let time):
-            guard finished[id] == nil else { return nil }
+            guard mode.isRace, finished[id] == nil, players.contains(where: { $0.id == id }) else { return nil }
             finished[id] = time
             if firstFinish == nil { firstFinish = Date() }
         case .died(_, let killer):
             if mode == .pvp && killer != 0 { kos[killer, default: 0] += 1 }
             return nil
         case .eliminated(let id):
-            guard mode == .pvp, !out.contains(id) else { return nil }
+            guard mode == .pvp, !out.contains(id), players.contains(where: { $0.id == id }) else { return nil }
             out.append(id)
         default: return nil
         }

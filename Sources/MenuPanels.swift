@@ -402,6 +402,12 @@ final class LANPanel: FlippedView, NSTextFieldDelegate {
     private let emptyLeft = WiiLabel(13, color: Wii.textSoft)
     private let emptyRight = WiiLabel(13, color: Wii.textSoft)
     private let inviteHeader = WiiLabel(15, bold: true)
+    private let problem = WiiLabel(13, bold: true, color: NSColor(srgbRed: 0.78, green: 0.22, blue: 0.16, alpha: 1))
+    private let fixButton = WiiButton("Open Settings", textSize: 14)
+    private let addressLabel = WiiLabel(13, color: Wii.textSoft)
+    private let addressField = WiiTextField(frame: .zero)
+    private let addressJoin = WiiButton("Join", textSize: 14)
+    private let myAddress = WiiLabel(13, color: Wii.textSoft)
     private var leftRows: [LANRow] = []
     private var rightRows: [LANRow] = []
     private var inviteRows: [LANRow] = []
@@ -413,13 +419,24 @@ final class LANPanel: FlippedView, NSTextFieldDelegate {
         colorLabel.text = "NAMETAG COLOR"
         nameField.delegate = self
         nameField.placeholderString = "Your name"
-        offlineInfo.text = "Play with friends on the same Wi-Fi or network — no server needed. Going online lets other Bird Games on your network see your name so they can invite you. macOS may ask to allow local network access."
+        offlineInfo.text = "Play with friends on the same Wi-Fi or network — no server needed. Going online lets other Bird Games on your network see your name so they can invite you. When macOS asks, allow Bird Game to find devices on your local network and to accept incoming connections."
+        addressLabel.text = "Game not showing up? Join by the host's address:"
+        addressField.placeholderAttributedString = NSAttributedString(string: "e.g. 192.168.1.23",
+            attributes: [.foregroundColor: Wii.textSoft.withAlphaComponent(0.7), .font: Wii.font(15)])
+        addressField.target = self
+        addressField.action = #selector(joinByAddress)
+        addressJoin.onClick = { [weak self] in self?.joinByAddress() }
+        fixButton.onClick = { [weak self] in
+            guard let self, let p = self.shownProblem else { return }
+            LANSession.openSettings(for: p)
+        }
         emptyLeft.text = "No games on your network yet. Ask a friend to host, or host one yourself."
         ruleNotes[0].text = "Flying into a bird knocks it flying (Ram vs Weight)."
         ruleNotes[1].text = "Attacks work in every mode, not just PvP Fight."
         ruleNotes[2].text = "Everyone glows through walls, with a compass."
         for v in [nameLabel, nameField, colorLabel, colors, status, online, offlineInfo, leftHeader, rightHeader, hostButton, leaveButton,
-                  collisions, pvp, showLocation, gameInfo, startRound, emptyLeft, emptyRight, inviteHeader] + ruleNotes as [NSView] { addSubview(v) }
+                  collisions, pvp, showLocation, gameInfo, startRound, emptyLeft, emptyRight, inviteHeader, problem, fixButton,
+                  addressLabel, addressField, addressJoin, myAddress] + ruleNotes as [NSView] { addSubview(v) }
         startRound.onClick = { [weak self] in self?.onStartRound?() }
         colors.onChange = { [weak self] i in self?.commitProfile(color: i) }
         online.onClick = { [weak self] in self?.onGoOnline?() }
@@ -430,7 +447,21 @@ final class LANPanel: FlippedView, NSTextFieldDelegate {
     required init?(coder: NSCoder) { fatalError() }
 
     // Name editing
-    func controlTextDidEndEditing(_ obj: Notification) { commitProfile(color: colors.selected) }
+    func controlTextDidEndEditing(_ obj: Notification) {
+        if (obj.object as AnyObject?) === nameField { commitProfile(color: colors.selected) }
+    }
+
+    @objc private func joinByAddress() {
+        guard lan.role == .idle, !addressField.stringValue.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        lan.join(address: addressField.stringValue)
+    }
+
+    /// The most important thing on this Mac that stops friends from connecting.
+    private var shownProblem: LANSession.Problem? {
+        if lan.problems.contains(.localNetwork) { return .localNetwork }
+        if lan.problems.contains(.firewall) { return .firewall }
+        return nil
+    }
     private func commitProfile(color: Int) { onProfileChanged?(nameField.stringValue, color) }
 
     private func rulesToggled() {
@@ -453,16 +484,33 @@ final class LANPanel: FlippedView, NSTextFieldDelegate {
         status.text = lan.status
         status.isHidden = role == .hosting || role == .joined
         for v in [leftHeader, rightHeader, hostButton, leaveButton, collisions, pvp, showLocation, gameInfo, startRound, emptyLeft, emptyRight,
-                  inviteHeader] + ruleNotes as [NSView] { v.isHidden = !isOnline }
+                  inviteHeader, addressLabel, addressField, addressJoin, myAddress] + ruleNotes as [NSView] { v.isHidden = !isOnline }
+        let shown = isOnline ? shownProblem : nil
+        problem.isHidden = shown == nil
+        fixButton.isHidden = shown == nil
+        switch shown {
+        case .localNetwork?:
+            problem.text = "Bird Game isn't allowed on your local network, so it can't find friends. Turn Bird Game on in Privacy & Security › Local Network, then quit and reopen the game."
+        case .firewall?:
+            problem.text = "Your Mac's firewall is blocking Bird Game, so friends can't join your games. In Network › Firewall › Options, set Bird Game to \u{201C}Allow incoming connections\u{201D}."
+        case nil: break
+        }
         guard isOnline else {
             rows(&leftRows, count: 0); rows(&rightRows, count: 0); rows(&inviteRows, count: 0)
             needsLayout = true
             return
         }
         let inGame = role == .hosting || role == .joined
-        hostButton.isHidden = inGame
-        leaveButton.isHidden = !inGame
-        leaveButton.title = role == .hosting ? "Stop hosting" : "Leave game"
+        hostButton.isHidden = inGame || role == .joining
+        leaveButton.isHidden = !inGame && role != .joining
+        leaveButton.title = role == .hosting ? "Stop hosting" : role == .joining ? "Cancel" : "Leave game"
+        for v in [addressLabel, addressField, addressJoin] as [NSView] { v.isHidden = inGame }
+        addressJoin.isEnabled = role == .idle
+        myAddress.isHidden = role != .hosting || lan.addresses.isEmpty
+        if let a = lan.addresses.first {
+            let port = lan.listeningPort.map { $0 == LANSession.port ? "" : ":\($0)" } ?? ""
+            myAddress.text = "Friends who don't see your game can join with your address:  \(a)\(port)"
+        }
         for t in [collisions, pvp, showLocation] { t.isHidden = !inGame }
         for l in ruleNotes { l.isHidden = !inGame }
         let l = lan.lobby
@@ -501,7 +549,7 @@ final class LANPanel: FlippedView, NSTextFieldDelegate {
             emptyRight.isHidden = true
             // Invites (host): nearby players not already in a game.
             if role == .hosting {
-                let peers = lan.nearby.filter { !$0.inGame }
+                let peers = lan.nearby.filter { !$0.inGame && $0.otherVersion == nil }
                 inviteHeader.text = "Invite nearby players"
                 inviteHeader.isHidden = false
                 rows(&inviteRows, count: peers.count)
@@ -537,6 +585,7 @@ final class LANPanel: FlippedView, NSTextFieldDelegate {
                 row.sub.text = "Join their game?"
                 row.a.isHidden = false; row.a.title = "Join"; row.a.isEnabled = true
                 row.a.onClick = { [weak self] in self?.lan.accept(inv) }
+                row.a.isEnabled = role == .idle
                 row.b.isHidden = false; row.b.title = "Ignore"; row.b.isEnabled = true
                 row.b.onClick = { [weak self] in self?.lan.dismiss(inv) }
             }
@@ -544,9 +593,14 @@ final class LANPanel: FlippedView, NSTextFieldDelegate {
                 let row = leftRows[invites.count + k]
                 row.dot.color = NameColors.ns(g.color)
                 row.title.text = "\(g.hostName)'s game"
-                row.sub.text = "\(g.mode.title) · \(WorldCatalog.info(g.world).name) · \(g.players)/\(LANSession.maxPlayers)"
+                if let v = g.otherVersion {
+                    row.sub.text = "Different version (\(v)) — can't join"
+                } else {
+                    row.sub.text = "\(g.mode.title) · \(WorldCatalog.info(g.world).name) · \(g.players)/\(LANSession.maxPlayers)"
+                }
                 row.a.isHidden = true
-                row.b.isHidden = false; row.b.title = "Join"; row.b.isEnabled = g.players < LANSession.maxPlayers
+                row.b.isHidden = false; row.b.title = "Join"
+                row.b.isEnabled = role == .idle && g.otherVersion == nil && g.players < LANSession.maxPlayers
                 row.b.onClick = { [weak self] in self?.lan.join(g) }
             }
             emptyLeft.isHidden = !(invites.isEmpty && games.isEmpty)
@@ -558,7 +612,7 @@ final class LANPanel: FlippedView, NSTextFieldDelegate {
                 let row = rightRows[i]
                 row.dot.color = NameColors.ns(p.color)
                 row.title.text = p.name
-                row.sub.text = p.inGame ? "In a game" : "Online"
+                row.sub.text = p.otherVersion.map { "Has Bird Game \($0)" } ?? (p.inGame ? "In a game" : "Online")
                 row.a.isHidden = true; row.b.isHidden = true
             }
             emptyRight.isHidden = !peers.isEmpty
@@ -580,7 +634,13 @@ final class LANPanel: FlippedView, NSTextFieldDelegate {
         offlineInfo.frame = NSRect(x: 0, y: 156, width: min(W, 560), height: 80)
 
         let colW = (W - 32) / 2
-        let top: CGFloat = status.isHidden ? 76 : 98
+        var top: CGFloat = status.isHidden ? 76 : 98
+        if !problem.isHidden {
+            let pw = min(W - 170, 720)
+            problem.frame = NSRect(x: 0, y: top - 10, width: pw, height: 36)
+            fixButton.frame = NSRect(x: pw + 10, y: top - 16, width: 150, height: 44)
+            top += 40
+        }
         leftHeader.frame = NSRect(x: 0, y: top, width: colW, height: 22)
         rightHeader.frame = NSRect(x: colW + 32, y: top, width: colW, height: 22)
         var y = top + 28
@@ -599,13 +659,19 @@ final class LANPanel: FlippedView, NSTextFieldDelegate {
         } else {
             for r in leftRows where !r.isHidden { r.frame = NSRect(x: 0, y: y, width: colW, height: 46); y += 48 }
             emptyLeft.frame = NSRect(x: 0, y: y, width: colW, height: 40)
+            if !emptyLeft.isHidden { y += 44 }
+            y = max(y + 8, top + 90)
+            addressLabel.frame = NSRect(x: 0, y: y, width: colW, height: 18)
+            addressField.frame = NSRect(x: 0, y: y + 24, width: min(colW - 110, 260), height: 32)
+            addressJoin.frame = NSRect(x: addressField.frame.maxX + 6, y: y + 18, width: 96, height: 44)
         }
         var ry = top + 28
         for r in rightRows where !r.isHidden { r.frame = NSRect(x: colW + 32, y: ry, width: colW, height: 46); ry += 48 }
         emptyRight.frame = NSRect(x: colW + 32, y: ry, width: colW, height: 20)
+        myAddress.frame = NSRect(x: colW + 32, y: ry + 10, width: colW, height: 36)
         hostButton.frame = NSRect(x: -5, y: H - 56, width: 240, height: 56)
         leaveButton.frame = NSRect(x: -5, y: H - 56, width: 240, height: 56)
         startRound.frame = NSRect(x: leaveButton.frame.maxX + 8, y: H - 56, width: 240, height: 56)
-        if lan.role == .idle { gameInfo.frame = NSRect(x: hostButton.frame.maxX + 14, y: H - 35, width: W - hostButton.frame.maxX - 14, height: 18) }
+        if lan.role == .idle || lan.role == .joining { gameInfo.frame = NSRect(x: hostButton.frame.maxX + 14, y: H - 35, width: W - hostButton.frame.maxX - 14, height: 18) }
     }
 }
