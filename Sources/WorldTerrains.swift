@@ -88,16 +88,16 @@ final class VolcanoTerrain: WorldTerrain {
                                     top: 0.3, sides: 6, color: SIMD3(1.0, 0.42, 0.08), yaw: rng.float(0, 6))
             } else if h > 5 && h < 140 && kind < 0.55 {
                 // Charred dead trees
-                let t = rng.float(4, 9)
-                TerrainManager.cone(&m, base: SIMD3(lx, h - 0.5, lz), height: t, radius: 0.35, top: 0.05, sides: 5,
-                                    color: SIMD3(0.12, 0.10, 0.10), yaw: rng.float(0, 6))
-                TerrainManager.cone(&m, base: SIMD3(lx, h + t * 0.55, lz), height: t * 0.35, radius: 0.12, top: 0.02, sides: 4,
-                                    color: SIMD3(0.14, 0.11, 0.10), yaw: rng.float(0, 6))
+                m.snag(at: SIMD3(lx, h, lz), height: rng.float(5, 10), color: SIMD3(0.13, 0.11, 0.10), &rng)
             } else if h > 2 && kind < 0.85 {
-                // Boulders
-                let r = rng.float(1.2, 3.5)
-                TerrainManager.cone(&m, base: SIMD3(lx, h - r * 0.4, lz), height: r * 1.1, radius: r, top: r * 0.35, sides: 5,
-                                    color: SIMD3(0.20, 0.18, 0.18), yaw: rng.float(0, 6))
+                // Boulders, sometimes in a little group
+                let r = rng.float(1.2, 3.2)
+                m.boulder(at: SIMD3(lx, h + r * 0.25, lz), radius: r, color: SIMD3(0.22, 0.20, 0.19), &rng)
+                if rng.float() < 0.4 {
+                    let a = rng.float(0, 6.28)
+                    let q = SIMD3(lx + cos(a) * r * 1.4, 0, lz + sin(a) * r * 1.4)
+                    m.boulder(at: SIMD3(q.x, height(ox + q.x, oz + q.z) + r * 0.15, q.z), radius: r * 0.55, color: SIMD3(0.24, 0.21, 0.2), &rng)
+                }
             }
         }
     }
@@ -220,20 +220,69 @@ final class CaveTerrain: WorldTerrain {
                                     color: cap, yaw: rng.float(0, 6))
             }
         }
-        // Crystals and vines hanging from the ceiling
+        // Crystal clusters and vines hanging from the ceiling
+        let crystalColors: [SIMD3<Float>] = [SIMD3(0.72, 0.50, 1.0), SIMD3(0.45, 0.85, 1.0), SIMD3(1.0, 0.55, 0.85)]
         for _ in 0..<55 {
             let lx = rng.float(3, chunkSize - 3), lz = rng.float(3, chunkSize - 3)
             let s = sample(ox + lx, oz + lz)
             guard s.open > 0.3 else { continue }
             let room = s.ceiling - s.floor
-            if rng.float() < 0.35 {
-                let len = min(rng.float(1.0, 3.0), room * 0.3)
-                TerrainManager.cone(&glow, base: SIMD3(lx, s.ceiling + 0.3, lz), height: -len, radius: len * 0.3, top: 0, sides: 5,
-                                    color: SIMD3(0.72, 0.50, 1.0), yaw: rng.float(0, 6))
+            if rng.float() < 0.22 {
+                // A cluster: one long crystal with shorter ones splaying out around it.
+                let color = crystalColors[Int(rng.float(0, 2.99))]
+                let root = SIMD3(lx, s.ceiling + 0.4, lz)
+                let main = min(rng.float(1.6, 3.4), room * 0.3)
+                let count = Int(rng.float(3, 6.99))
+                for k in 0..<count {
+                    let a = Float(k) / Float(count) * 2 * .pi + rng.float(-0.3, 0.3)
+                    let splay: Float = k == 0 ? 0.08 : rng.float(0.35, 0.8)
+                    let dir = SIMD3(cos(a) * splay, -1, sin(a) * splay)
+                    let len = k == 0 ? main : main * rng.float(0.35, 0.7)
+                    glow.crystal(base: root + SIMD3(cos(a), 0, sin(a)) * (k == 0 ? 0 : main * 0.12), dir: dir, length: len,
+                                 radius: len * 0.16, color: color * rng.float(0.8, 1.0), twist: rng.float(0, 1))
+                }
             } else {
                 let len = min(rng.float(2, 7), room * 0.45)
-                TerrainManager.cone(&m, base: SIMD3(lx, s.ceiling + 0.3, lz), height: -len, radius: 0.1, top: 0.03, sides: 4,
-                                    color: SIMD3(0.22, 0.48, 0.20), yaw: rng.float(0, 6))
+                let top = SIMD3(lx, s.ceiling + 0.3, lz)
+                let sway = SIMD3(rng.float(-0.4, 0.4), 0, rng.float(-0.4, 0.4))
+                m.limb(from: top, to: top + SIMD3(0, -len * 0.55, 0) + sway * 0.5, r0: 0.1, r1: 0.07, sides: 4, color: SIMD3(0.22, 0.48, 0.20))
+                m.limb(from: top + SIMD3(0, -len * 0.55, 0) + sway * 0.5, to: top + SIMD3(0, -len, 0) + sway, r0: 0.07, r1: 0.02, sides: 4,
+                       color: SIMD3(0.26, 0.54, 0.22))
+            }
+        }
+        // Rock stalactites and stalagmites toward the walls (never in the middle, where you fly through).
+        for _ in 0..<26 {
+            let lx = rng.float(3, chunkSize - 3), lz = rng.float(3, chunkSize - 3)
+            let s = sample(ox + lx, oz + lz)
+            guard s.open > 0.12, s.open < 0.6 else { continue }
+            let room = s.ceiling - s.floor
+            let len = min(rng.float(1.5, 5), room * 0.3)
+            let r = len * rng.float(0.16, 0.24)
+            let rock = SIMD3<Float>(0.30, 0.29, 0.34) * rng.float(0.85, 1.1)
+            if rng.float() < 0.6 {
+                let top = SIMD3(lx, s.ceiling + 0.5, lz)
+                m.limb(from: top, to: top - SIMD3(rng.float(-0.2, 0.2), len, rng.float(-0.2, 0.2)), r0: r, r1: 0, sides: 5, color: rock,
+                       tipColor: rock * 1.2, twist: rng.float(0, 1))
+            } else {
+                let base = SIMD3(lx, s.floor - 0.4, lz)
+                m.limb(from: base, to: base + SIMD3(rng.float(-0.2, 0.2), len * 0.8, rng.float(-0.2, 0.2)), r0: r * 1.2, r1: 0, sides: 5,
+                       color: rock, tipColor: rock * 1.2, twist: rng.float(0, 1))
+            }
+        }
+        // Now and then a crystal cluster on the floor.
+        for _ in 0..<6 {
+            let lx = rng.float(3, chunkSize - 3), lz = rng.float(3, chunkSize - 3)
+            let s = sample(ox + lx, oz + lz)
+            guard s.open > 0.2, s.open < 0.75, rng.float() < 0.5 else { continue }
+            let color = crystalColors[Int(rng.float(0, 2.99))]
+            let root = SIMD3(lx, s.floor - 0.3, lz)
+            let main = min(rng.float(1.5, 3.2), (s.ceiling - s.floor) * 0.25)
+            for k in 0..<Int(rng.float(3, 5.99)) {
+                let a = rng.float(0, 6.28)
+                let splay: Float = k == 0 ? 0.1 : rng.float(0.3, 0.75)
+                let len = k == 0 ? main : main * rng.float(0.4, 0.75)
+                glow.crystal(base: root + SIMD3(cos(a), 0, sin(a)) * (k == 0 ? 0 : main * 0.15), dir: SIMD3(cos(a) * splay, 1, sin(a) * splay),
+                             length: len, radius: len * 0.17, color: color * rng.float(0.8, 1.0), twist: rng.float(0, 1))
             }
         }
     }
@@ -252,8 +301,9 @@ final class FarmTerrain: WorldTerrain {
     func height(_ x: Float, _ z: Float) -> Float {
         var h = Noise.fbm(x * 0.0007 + 3, z * 0.0007 - 2, octaves: 4) * 90 + 28
         h += Noise.fbm(x * 0.003, z * 0.003 + 9, octaves: 2) * 9
-        // Flatten the lowlands a little so fields look farmed.
-        if h > 2 && h < 40 { h = lerp(h, 2 + (h - 2) * 0.6, 0.5) }
+        // Flatten the lowlands a little so fields look farmed, easing off smoothly toward the hills (a hard cut-off
+        // here used to leave a jagged step in the ground).
+        if h > 2 { h = lerp(h, 2 + (h - 2) * 0.6, 0.5 * smoothstep(48, 24, h)) }
         return h
     }
 

@@ -445,7 +445,7 @@ enum NetTest {
             print("\(ok ? "PASS" : "FAIL")  \(what)")
         }
         let host = LANSession(); host.name = "Hosty"; host.color = 5
-        let guest = LANSession(); guest.name = "Guesty"; guest.color = 2; guest.bird = "falcon"
+        let guest = LANSession(); guest.name = "Guesty"; guest.color = 2; guest.bird = "falcon"; guest.fit = "h=tophat,t=rainbow"
         let other = LANSession(); other.name = "Invitee"; other.color = 7
         let third = LANSession(); third.name = "Thirdy"; third.color = 4
         var hostEvents: [(Int, GameEvent)] = []
@@ -465,6 +465,13 @@ enum NetTest {
         oldHost?.service = NWListener.Service(name: "Oldie · OLD00000", type: LANSession.serviceType, domain: nil, txtRecord: oldTXT)
         oldHost?.newConnectionHandler = { $0.cancel() }
         oldHost?.start(queue: .main)
+        // A 0.2.1 game (protocol 4, which sent its app version).
+        var v021 = NWTXTRecord()
+        for (k, v) in ["n": "Olivia", "c": "3", "i": "OLD00021", "v": "4", "a": "0.2.1", "h": "1", "g": "1", "m": "ringRace", "w": "volcano", "p": "2"] { v021[k] = v }
+        let v021Host = try? NWListener(using: oldParams)
+        v021Host?.service = NWListener.Service(name: "Olivia · OLD00021", type: LANSession.serviceType, domain: nil, txtRecord: v021)
+        v021Host?.newConnectionHandler = { $0.cancel() }
+        v021Host?.start(queue: .main)
 
         host.goOnline()
         wait("host listens on the fixed port \(LANSession.port)") { host.listeningPort == LANSession.port }
@@ -473,6 +480,7 @@ enum NetTest {
         host.host(mode: .ringRace, world: "volcano", rules: MatchRules(collisions: true, pvp: false, showLocation: true))
         wait("guest discovers the hosted game") { guest.games.contains { $0.hostName == "Hosty" && $0.otherVersion == nil } }
         wait("guest sees the 0.2 game marked as a different version") { guest.games.contains { $0.hostName == "Oldie" && $0.otherVersion == "0.2" } }
+        wait("guest sees a 0.2.1 game marked as a different version") { guest.games.contains { $0.hostName == "Olivia" && $0.otherVersion == "0.2.1" } }
         if let old = guest.games.first(where: { $0.hostName == "Oldie" }) {
             guest.join(old)
             print("      trying to join it: \(guest.status)")
@@ -485,6 +493,7 @@ enum NetTest {
         }
         wait("guest joined with id 2 and sees both players") { guest.role == .joined && guest.localId == 2 && guest.lobby.players.count == 2 }
         wait("host lobby lists the guest (falcon)") { host.lobby.players.contains { $0.name == "Guesty" && $0.bird == "falcon" } }
+        wait("the guest's outfit (top hat, rainbow trail) reaches the host") { host.lobby.players.contains { $0.name == "Guesty" && $0.fit == "h=tophat,t=rainbow" } }
         wait("the host's advertised player count updates without restarting") { third.games.first { $0.hostName == "Hosty" }?.players == 2 }
         // Join by typing the address.
         print("      host addresses: \(host.addresses)")
@@ -586,6 +595,7 @@ enum NetTest {
         print("      third was told: \(thirdEnded ?? "-")")
         guest.leave(); third.leave()
         oldHost?.cancel()
+        v021Host?.cancel()
         print(failures == 0 ? "ALL PASSED" : "\(failures) FAILED")
     }
 }
@@ -655,10 +665,10 @@ enum Gallery {
                 var t = 0.0
                 for _ in 0..<30 { g.update(time: t); t += 1.0 / 30 }
                 if let v = g.runtime as? VolcanoRuntime, let vent = v.debugEruptNearest(to: g.flight.pos) {
-                    for _ in 0..<110 {
+                    for _ in 0..<62 {
                         g.update(time: t)
-                        g.cameraNode.simdPosition = vent + SIMD3(70, 30, 70)
-                        g.cameraNode.simdLook(at: vent + SIMD3(0, 30, 0), up: kUp, localFront: SIMD3(0, 0, -1))
+                        g.cameraNode.simdPosition = vent + SIMD3(90, 25, 90)
+                        g.cameraNode.simdLook(at: vent + SIMD3(0, 36, 0), up: kUp, localFront: SIMD3(0, 0, -1))
                         _ = r.snapshot(atTime: t, with: CGSize(width: 64, height: 40), antialiasingMode: .none)
                         t += 1.0 / 30
                     }
@@ -817,6 +827,44 @@ enum ScenarioTest {
             check(o.place == o.of, "you place last after being eliminated first (\(o.place)/\(o.of))")
             print("      standings: " + o.standings.map { "\($0.place). \($0.name)" }.joined(separator: ", "))
         }
+
+        // --- Speed-race checkpoints: the next one pulses in place (its node used to sit at the world's origin, so the
+        // pulse swung the hoop back and forth by ~5% of its distance from there: tens of metres on the Dogfight course).
+        let sr = Game(controls: SharedControls(), world: .dogfight, mode: .speedRace, species: sp, points: sp.base, terrainRadius: 3)
+        sr.synchronousTerrain = true
+        step(sr, 4.5)
+        if let st = sr.track, st.gates.indices.contains(sr.nextGate) {
+            let gate = st.gates[sr.nextGate]
+            var worst: Float = 0
+            for _ in 0..<90 {
+                step(sr, 1.0 / 60)
+                let b = gate.node.boundingSphere.center
+                let world = gate.node.simdConvertPosition(SIMD3(Float(b.x), Float(b.y), Float(b.z)), to: nil)
+                worst = max(worst, simd_distance(world, gate.center))
+            }
+            check(worst < 0.5, String(format: "the next checkpoint pulses in place (%.0f m from the origin, moved %.2f m)",
+                                       simd_length(gate.center), worst))
+        } else {
+            check(false, "speed race has checkpoints")
+        }
+
+        // --- Test codes: unlock every cosmetic, then reset everything (which takes them all away again).
+        let key = "progress.scenario-codes"
+        UserDefaults.standard.removeObject(forKey: key)
+        let p = Progress(key: key)
+        let buyable = CosmeticCatalog.all.filter { !CosmeticCatalog.isFree($0) }
+        check(p.unlockAllCosmetics() == buyable.count && buyable.allSatisfy(p.ownsCosmetic), "the code unlocks all \(buyable.count) cosmetics")
+        check(p.unlockAllCosmetics() == 0, "…and again does nothing")
+        p.wear(CosmeticCatalog.item("crown", .hat), slot: .hat)
+        p.wear(CosmeticCatalog.item("stardust", .trail), slot: .trail)
+        check(p.outfit.code.contains("crown") && p.outfit.code.contains("stardust"), "unlocked things can be worn (\(p.outfit.code))")
+        p.grant(500)
+        p.resetAll()
+        check(p.coins == 0 && p.cosmeticsOwned == 0 && p.outfit == Outfit() && !buyable.contains(where: p.ownsCosmetic),
+              "reset takes every cosmetic away and undresses the bird")
+        check(Progress(key: key).cosmeticsOwned == 0, "…and it stays reset after a restart")
+        UserDefaults.standard.removeObject(forKey: key)
+
         print(failures == 0 ? "ALL PASSED" : "\(failures) FAILED")
     }
 }
@@ -827,9 +875,18 @@ enum PerfTest {
     static func run(bird: String, seconds: Double) {
         let sp = Catalog.species(bird)
         let device = MTLCreateSystemDefaultDevice()
-        func measure(_ label: String, _ mode: GameMode, attack: Bool) {
-            let g = Game(controls: SharedControls(), world: .meadow, mode: mode, species: sp, points: sp.base, terrainRadius: 4)
+        let heavy = Outfit(code: "h=crown,e=visor,n=rainbowscarf,t=stardust,p=galaxy")
+        func measure(_ label: String, _ mode: GameMode, attack: Bool, dressed: Bool = false, world: WorldID = .meadow) {
+            let g = Game(controls: SharedControls(), world: world, mode: mode, species: sp, points: sp.base,
+                         outfit: dressed ? heavy : Outfit(), terrainRadius: 4)
             g.synchronousTerrain = true
+            func dress() {
+                // Everyone in their fanciest clothes, each with a different trail.
+                let trails = ["rainbow", "fire", "neon", "confetti", "smoke", "hearts"]
+                for (i, b) in g.bots.enumerated() {
+                    b.avatar.setLook(species: b.avatar.speciesId, outfit: "h=tophat,e=aviators,n=scarf,t=\(trails[i % trails.count]),p=chrome")
+                }
+            }
             let r = SCNRenderer(device: device, options: nil)
             r.scene = g.scene
             r.pointOfView = g.cameraNode
@@ -842,14 +899,27 @@ enum PerfTest {
                 }
             }
             var t = 0.0
+            let verbose = ProcessInfo.processInfo.environment["PERF_VERBOSE"] != nil
+            if verbose {
+                g.debugEvent = { e in if !e.hasPrefix("hit from") { print(String(format: "     %.2f %@", t, e)) } }
+                g.onNotice = { e in print(String(format: "     %.2f notice: %@", t, e)) }
+                g.onKnockout = { e in print(String(format: "     %.2f KO %@", t, e)) }
+            }
+            var chunks = g.terrain.loadedCount
+            // Like the app: compile the world's (and the attacks') shaders up front.
+            for o in g.warmupObjects() { _ = r.prepare(o, shouldAbortBlock: nil) }
             // Warm up (terrain, shaders).
-            for _ in 0..<120 { g.update(time: t); _ = r.snapshot(atTime: t, with: CGSize(width: 320, height: 200), antialiasingMode: .none); t += 1.0 / 60 }
+            for k in 0..<120 {
+                if k == 60 && dressed { dress() }
+                g.update(time: t); _ = r.snapshot(atTime: t, with: CGSize(width: 320, height: 200), antialiasingMode: .none); t += 1.0 / 60
+            }
             // From here on, terrain streams in the background like in the real game.
             g.synchronousTerrain = false
             var times: [Double] = [], maxProj = 0
             let frames = Int(seconds * 60)
             for _ in 0..<frames {
                 if attack { g.keys.attack = true; g.fighter.shield = 99; g.fighter.health = Fighter.maxHealth }
+                if verbose { RunLoop.main.run(until: Date()) }
                 let t0 = CACurrentMediaTime()
                 let before = g.combat.activeCount
                 g.update(time: t)
@@ -862,14 +932,794 @@ enum PerfTest {
                                  (t2 - t1) * 1000, before, g.combat.activeCount))
                 }
                 maxProj = max(maxProj, g.combat.activeCount)
+                if verbose && g.terrain.loadedCount != chunks {
+                    print(String(format: "     %.2f terrain chunks %d -> %d", t, chunks, g.terrain.loadedCount))
+                    chunks = g.terrain.loadedCount
+                }
                 t += 1.0 / 60
             }
             let sorted = times.sorted()
             let avg = times.reduce(0, +) / Double(times.count)
-            print(String(format: "%-28@ avg %5.1f ms   p95 %5.1f   worst %5.1f   frames over 33 ms: %d   max projectiles %d",
+            print(String(format: "%-30@ avg %5.1f ms   p95 %5.1f   worst %5.1f   frames over 33 ms: %d   max projectiles %d",
                          label as NSString, avg, sorted[Int(Double(sorted.count) * 0.95)], sorted.last!, times.filter { $0 > 33 }.count, maxProj))
         }
         measure("free flight", .freeRoam, attack: false)
+        measure("free flight, dressed up", .freeRoam, attack: false, dressed: true)
         measure("fight, \(sp.name) attacking", .pvp, attack: true)
+        let bots = BotSettings.count
+        BotSettings.count = 5
+        measure("fight, 5 bots, all dressed", .pvp, attack: true, dressed: true)
+        measure("caves fight, 5 dressed", .pvp, attack: true, dressed: true, world: .caves)
+        measure("volcano free flight, dressed", .freeRoam, attack: false, dressed: true, world: .volcano)
+        BotSettings.count = bots
+    }
+}
+
+enum EconomySim {
+    /// `--economy-sim [minutes]`: how fast coins come in. A ring-chasing autopilot flies free roam in every world, then every
+    /// race course and a fight, and prints coins per minute (the autopilot is better than a person flapping, so treat these
+    /// as an upper bound).
+    static func run(minutes: Double) {
+        func luckBonus(_ sp: Species) -> Float { 0.6 + 0.08 * Float(sp.base[BirdStat.luck.rawValue]) }
+        func perRing(_ sp: Species) -> Float { (5 * luckBonus(sp)).rounded() }
+        print("FREE ROAM (\(Int(minutes)) min each, autopilot chasing rings)")
+        for world in [WorldID.meadow, .volcano, .caves, .dogfight] {
+            for bird in ["gull", "phoenix"] {
+                let sp = Catalog.species(bird)
+                let g = Game(controls: SharedControls(), world: world, mode: .freeRoam, species: sp, points: sp.base, terrainRadius: 3)
+                g.synchronousTerrain = true
+                var phase: Float = 0
+                g.debugSteer = { g in
+                    guard let r = g.rings.next else { return nil }
+                    if let cave = g.runtime as? CaveRuntime, let s = cave.autopilot(g.flight) {
+                        // Caves: follow the tunnel, aiming at the ring once it's close.
+                        var i = steerToward(g, r.center, phase: &phase, dt: 1.0 / 60)
+                        if simd_distance(r.center, g.flight.pos) > 25 { i.roll = s.roll; i.pitch = s.pitch }
+                        return i
+                    }
+                    return steerToward(g, r.center, phase: &phase, dt: 1.0 / 60)
+                }
+                var coins: Float = 0, rings = 0, lost = 0, bestStreak = 0
+                let w = WorldCatalog.info(world.rawValue)
+                g.onRing = { streak in
+                    rings += 1
+                    bestStreak = max(bestStreak, streak)
+                    let bonus: Float = w.isChallenge ? w.ringMultiplier * (1 + 0.25 * Float(min(max(streak - 1, 0), 8))) : 1
+                    coins += (perRing(sp) * bonus).rounded()
+                }
+                g.onHit = { lost += $0 }
+                var t = 0.0
+                while t < minutes * 60 {
+                    g.update(time: t)
+                    t += 1.0 / 60
+                    if Int(t * 60) % 30 == 0 { RunLoop.main.run(until: Date()) }
+                }
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                print(String(format: "  %-9@ %-8@ rings/min %5.1f  coins/min %6.1f  (lost %d)  best streak %d",
+                             world.rawValue as NSString, bird as NSString, Float(rings) / Float(minutes),
+                             (coins - Float(lost)) / Float(minutes), lost, bestStreak))
+            }
+        }
+        print("RACES (gull, autopilot)")
+        for world in [WorldID.meadow, .volcano, .caves, .dogfight] {
+            for mode in [GameMode.ringRace, .speedRace] {
+                let sp = Catalog.species("gull")
+                let g = Game(controls: SharedControls(), world: world, mode: mode, species: sp, points: sp.base, terrainRadius: 3)
+                g.synchronousTerrain = true
+                let track = g.track!
+                var phase: Float = 0
+                g.debugSteer = { g in
+                    let target = g.nextGate < track.gates.count && simd_distance(track.gates[g.nextGate].center, g.flight.pos) < 60
+                        ? track.gates[g.nextGate].center : track.point(atArc: min(g.progressS + 45, track.length))
+                    return steerToward(g, target, phase: &phase, dt: 1.0 / 60)
+                }
+                var out: MatchOutcome?
+                g.onMatchOver = { out = $0 }
+                var t = 0.0
+                while out == nil && t < 600 {
+                    g.update(time: t)
+                    t += 1.0 / 60
+                    if Int(t * 60) % 30 == 0 { RunLoop.main.run(until: Date()) }
+                }
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                guard let o = out, let time = o.time else { print("  \(world.rawValue) \(mode.rawValue): did not finish"); continue }
+                let medal = Medal.of(time, o.medals)
+                let base = o.gates * 3 + 25 + (medal?.coins ?? 0)
+                let firstTime = o.gates * 3 + 25 + 15 + (medal?.coins ?? 0) * 2
+                print(String(format: "  %-9@ %-10@ %@ (%@)  missed %d  coins %d (first medal %d)  ≈ %.0f coins/min",
+                             world.rawValue as NSString, mode.rawValue as NSString, raceClock(time), medal?.name ?? "no medal",
+                             o.missed, base, firstTime, Double(base) / ((time + 12) / 60)))
+            }
+        }
+    }
+}
+
+enum CosmeticGallery {
+    /// `--cosmetic-gallery <dir> [slot or item id]`: every cosmetic on every playable bird, from a close 3/4 front view and
+    /// the in-game chase camera (trails: from the side and the chase camera after a short curving flight).
+    static func run(dir: String, filter: String?) {
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        // GALLERY_BIRDS=owl,gull limits the birds.
+        let only = ProcessInfo.processInfo.environment["GALLERY_BIRDS"]?.split(separator: ",").map(String.init)
+        let birds = Catalog.playable.filter { only?.contains($0.id) ?? true }
+        let cell = CGSize(width: 360, height: 270)
+        let device = MTLCreateSystemDefaultDevice()
+        if filter == "combos" { combos(dir: dir, cell: cell, device: device); return }
+        var items = CosmeticCatalog.all
+        if let f = filter { items = items.filter { $0.slot.rawValue == f || $0.id == f } }
+        for item in items {
+            let rows = item.slot == .trail ? 2 : 3
+            var shots: [[NSImage]] = Array(repeating: [], count: rows)
+            for sp in birds {
+                var outfit = Outfit()
+                outfit[item.slot] = item.id
+                let views = render(sp, outfit: outfit, trail: item.slot == .trail, size: cell, device: device)
+                for r in 0..<rows { shots[r].append(views[r]) }
+            }
+            let sheet = NSImage(size: NSSize(width: cell.width * CGFloat(birds.count), height: cell.height * CGFloat(rows) + 30), flipped: false) { r in
+                NSColor(white: 0.12, alpha: 1).setFill(); r.fill()
+                for row in 0..<rows {
+                    for (i, img) in shots[row].enumerated() {
+                        img.draw(in: NSRect(x: CGFloat(i) * cell.width, y: CGFloat(rows - 1 - row) * cell.height, width: cell.width, height: cell.height))
+                    }
+                }
+                let label = "\(item.name) (\(item.slot.rawValue), \(item.rarity.name))   " + birds.map(\.name).joined(separator: " · ")
+                (label as NSString).draw(at: NSPoint(x: 8, y: cell.height * CGFloat(rows) + 8),
+                                         withAttributes: [.foregroundColor: NSColor.white, .font: NSFont.boldSystemFont(ofSize: 14)])
+                return true
+            }
+            if let tiff = sheet.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+               let png = rep.representation(using: .png, properties: [:]) {
+                try? png.write(to: URL(fileURLWithPath: "\(dir)/\(item.slot.rawValue)-\(item.id).png"))
+            }
+            print("rendered \(item.slot.rawValue) \(item.id)")
+        }
+    }
+
+    /// Whole outfits (hat + glasses + neck + paint) on the birds, to catch items that clash.
+    static func combos(dir: String, cell: CGSize, device: MTLDevice?) {
+        let outfits: [(String, Outfit)] = [
+            ("beanie+shades+scarf", Outfit(code: "h=beanie,e=shades,n=scarf")),
+            ("cap+aviators+bandana", Outfit(code: "h=cap,e=aviators,n=bandana")),
+            ("viking+goggles+medal", Outfit(code: "h=viking,e=goggles,n=medal")),
+            ("crown+monocle+bowtie", Outfit(code: "h=crown,e=monocle,n=bowtie,p=chrome")),
+            ("explorer+nerd+bell", Outfit(code: "h=explorer,e=nerd,n=bell,p=robin")),
+            ("chef+heartglasses+lei", Outfit(code: "h=chef,e=heartglasses,n=lei,p=candy")),
+            ("grad+pixel+rainbowscarf", Outfit(code: "h=grad,e=pixel,n=rainbowscarf,p=midnight")),
+            ("propeller+threed+bowtie", Outfit(code: "h=propeller,e=threed,n=bowtie,p=tropical")),
+            ("cowboy+visor+bandana", Outfit(code: "h=cowboy,e=visor,n=bandana,p=camo")),
+            ("tophat+starshades+medal", Outfit(code: "h=tophat,e=starshades,n=medal,p=gold")),
+            ("pirate+shades+bell", Outfit(code: "h=pirate,e=shades,n=bell,p=tiger")),
+            ("wizard+monocle+scarf", Outfit(code: "h=wizard,e=monocle,n=scarf,p=galaxy")),
+            ("unicorn+heartglasses+lei", Outfit(code: "h=unicorn,e=heartglasses,n=lei,p=flamingo")),
+            ("sombrero+aviators+bandana", Outfit(code: "h=sombrero,e=aviators,n=bandana,p=sunset")),
+            ("party+nerd+bowtie", Outfit(code: "h=party,e=nerd,n=bowtie,p=bluejay")),
+            ("halo+visor+rainbowscarf", Outfit(code: "h=halo,e=visor,n=rainbowscarf,p=neonpaint")),
+        ]
+        let birds = Catalog.playable
+        for (name, o) in outfits {
+            var row: [[NSImage]] = [[], [], []]
+            for sp in birds {
+                let v = render(sp, outfit: o, trail: false, size: cell, device: device)
+                for r in 0..<3 { row[r].append(v[r]) }
+            }
+            let sheet = NSImage(size: NSSize(width: cell.width * CGFloat(birds.count), height: cell.height * 2 + 30), flipped: false) { r in
+                NSColor(white: 0.12, alpha: 1).setFill(); r.fill()
+                for (i, img) in row[0].enumerated() { img.draw(in: NSRect(x: CGFloat(i) * cell.width, y: cell.height, width: cell.width, height: cell.height)) }
+                for (i, img) in row[2].enumerated() { img.draw(in: NSRect(x: CGFloat(i) * cell.width, y: 0, width: cell.width, height: cell.height)) }
+                (name as NSString).draw(at: NSPoint(x: 8, y: cell.height * 2 + 8), withAttributes: [.foregroundColor: NSColor.white, .font: NSFont.boldSystemFont(ofSize: 14)])
+                return true
+            }
+            if let tiff = sheet.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff), let png = rep.representation(using: .png, properties: [:]) {
+                try? png.write(to: URL(fileURLWithPath: "\(dir)/combo-\(name).png"))
+            }
+        }
+    }
+
+    /// Returns [close-up or side view, chase view, rear close-up (not for trails)].
+    static func render(_ sp: Species, outfit: Outfit, trail: Bool, size: CGSize, device: MTLDevice?,
+                       pose: (Float, Float) = (0.15, 0)) -> [NSImage] {
+        let scene = SCNScene()
+        scene.lightingEnvironment.contents = Sky.cachedFaces
+        scene.lightingEnvironment.intensity = 1.25
+        scene.background.contents = Sky.cachedFaces
+        let sun = SCNNode()
+        sun.light = SCNLight()
+        sun.light?.type = .directional
+        sun.light?.intensity = 2000
+        sun.simdLook(at: -Sky.sunDir, up: kUp, localFront: SIMD3(0, 0, -1))
+        scene.rootNode.addChildNode(sun)
+        let bird = BirdNode(look: sp.look, outfit: outfit)
+        scene.rootNode.addChildNode(bird.node)
+        scene.rootNode.addChildNode(bird.fxRoot)
+        let cam = SCNNode()
+        cam.camera = SCNCamera()
+        cam.camera?.zNear = 0.05
+        cam.camera?.wantsHDR = true
+        cam.camera?.bloomIntensity = 0.5
+        cam.camera?.bloomThreshold = 1.1
+        cam.camera?.exposureOffset = 0.15
+        scene.rootNode.addChildNode(cam)
+        let r = SCNRenderer(device: device, options: nil)
+        r.scene = scene
+        r.pointOfView = cam
+        let k = 1.25 * sp.look.size
+        func snap(_ t: Double) -> NSImage { r.snapshot(atTime: t, with: size, antialiasingMode: .multisampling4X) }
+        let wing = WingPose(elevation: pose.0, bend: pose.1)
+        var t = 0.0
+        if trail {
+            // Fly a gentle curve for a moment so the trail builds up.
+            var pos = SIMD3<Float>(0, 50, 0), yaw: Float = 0
+            var camPos = pos + SIMD3(0, 1.45, 5)
+            let dt: Float = 1.0 / 60
+            for i in 0..<100 {
+                yaw += dt * 0.35
+                let fwd = SIMD3(-sin(yaw), 0, -cos(yaw))
+                pos += fwd * 20 * dt
+                let flap = sin(Float(i) * 0.35) * 0.6
+                bird.node.simdPosition = pos
+                bird.node.simdOrientation = simd_quatf(angle: yaw, axis: kUp) * simd_quatf(angle: 0.25, axis: SIMD3(0, 0, 1))
+                bird.pose(left: WingPose(elevation: 0.15 + flap, bend: 0), right: WingPose(elevation: 0.15 + flap, bend: 0), fold: 0, pitchIn: 0, rollIn: 0, dt: dt)
+                camPos = pos - fwd * 5 + SIMD3(0, 1.45, 0)
+                bird.tick(dt: dt, speed: 20, camera: camPos, emitting: true)
+                cam.simdPosition = camPos
+                cam.simdLook(at: pos + fwd * 5 + SIMD3(0, 0.35, 0), up: kUp, localFront: SIMD3(0, 0, -1))
+                _ = r.snapshot(atTime: t, with: CGSize(width: 32, height: 24), antialiasingMode: .none)
+                t += Double(dt)
+            }
+            let fwd = SIMD3(-sin(yaw), 0, -cos(yaw))
+            let side = simd_normalize(simd_cross(fwd, kUp))
+            cam.camera?.fieldOfView = 50
+            cam.simdPosition = pos - fwd * 6 + side * 7 + SIMD3(0, 2.5, 0)
+            cam.simdLook(at: pos - fwd * 5, up: kUp, localFront: SIMD3(0, 0, -1))
+            // Ribbons turn to face whichever camera is looking.
+            bird.tick(dt: 0.0001, speed: 20, camera: cam.simdPosition, emitting: true)
+            let a = snap(t)
+            bird.tick(dt: 0.0001, speed: 20, camera: camPos, emitting: true)
+            cam.camera?.fieldOfView = 62
+            cam.simdPosition = camPos
+            cam.simdLook(at: pos + fwd * 5 + SIMD3(0, 0.35, 0), up: kUp, localFront: SIMD3(0, 0, -1))
+            let b = snap(t + 0.001)
+            return [a, b]
+        }
+        bird.node.simdPosition = .zero
+        bird.pose(left: wing, right: wing, fold: 0, pitchIn: 0, rollIn: 0, dt: 1)
+        for _ in 0..<3 { bird.tick(dt: 1.0 / 30, speed: 14, camera: .zero, emitting: false) }
+        // Close 3/4 front view of the head.
+        let headPos = sp.look.headCenter * k
+        let hk = k * sp.look.headScale
+        cam.camera?.fieldOfView = 34
+        cam.simdPosition = headPos + SIMD3(0.55, 0.3, -1.12) * hk
+        cam.simdLook(at: headPos + SIMD3(0, 0.02, 0) * k, up: kUp, localFront: SIMD3(0, 0, -1))
+        let a = snap(0)
+        // In-game chase camera.
+        cam.camera?.fieldOfView = 60
+        cam.simdPosition = SIMD3(0, 1.45, 4.6)
+        cam.simdLook(at: SIMD3(0, 0.35, -5), up: kUp, localFront: SIMD3(0, 0, -1))
+        let b = snap(0.01)
+        // Close from behind and above (the pause-menu orbit sees the bird like this).
+        cam.camera?.fieldOfView = 40
+        cam.simdPosition = headPos + SIMD3(-0.55, 0.75, 1.5) * hk
+        cam.simdLook(at: headPos + SIMD3(0, 0.0, 0.1) * hk, up: kUp, localFront: SIMD3(0, 0, -1))
+        let c = snap(0.02)
+        return [a, b, c]
+    }
+}
+
+enum TutorialTest {
+    /// A stand-in for the app: the real game and arm interpreter, fed with scripted body poses.
+    final class Host: TutorialHost {
+        let game: Game
+        let shared: SharedControls
+        let interp = ArmInterpreter()
+        var paused = false
+        var tourStarted = false
+        var log: [String] = []
+        init(game: Game, shared: SharedControls) { self.game = game; self.shared = shared }
+        var tutorialStats: HUDStats { game.stats }
+        var tutorialControl: ControlState { shared.control }
+        var tutorialPaused: Bool { paused }
+        func tutorialRecalibrate() { interp.recalibrate() }
+        func tutorialRings(_ on: Bool) { game.setTutorialRings(on) }
+        func tutorialTargets(_ on: Bool) { game.setPracticeTargets(on) }
+        func tutorialBigPreview(_ on: Bool) {}
+        func tutorialStartMenuTour() { tourStarted = true }
+        func tutorialSound(_ success: Bool) {}
+        var finished: Bool?
+        func tutorialFinished(completed: Bool) { finished = completed }
+    }
+
+    /// Raw keypoints for arm elevations (radians above level, person's left then right), like DemoPoseSource.
+    static func pose(_ t: Double, left eL: Float, right eR: Float, bendL: Float = 0, bendR: Float = 0, reach: Float = 1) -> RawPose {
+        var p = RawPose(time: t, aspect: 1760.0 / 1328.0)
+        let sw: Float = 0.17, l1: Float = 0.15, l2: Float = 0.14, cy: Float = 0.6
+        func put(_ j: Joint, _ x: Float, _ y: Float) { p[j] = SIMD3(x / p.aspect + 0.5, y, 0.9) }
+        put(.neck, 0, cy + 0.02); put(.nose, 0, cy + 0.12)
+        put(.lHip, sw * 0.35, cy - 0.3); put(.rHip, -sw * 0.35, cy - 0.3)
+        for (side, e, b) in [(Float(1), eL, bendL), (Float(-1), eR, bendR)] {
+            let sx = side * sw / 2
+            let ex = sx + side * cos(e) * l1 * reach, ey = cy + sin(e) * l1
+            let wx = ex + side * cos(e + b) * l2 * reach, wy = ey + sin(e + b) * l2
+            if side > 0 { put(.lShoulder, sx, cy); put(.lElbow, ex, ey); put(.lWrist, wx, wy) }
+            else { put(.rShoulder, sx, cy); put(.rElbow, ex, ey); put(.rWrist, wx, wy) }
+        }
+        return p
+    }
+
+    /// `--tutorial-test`: play through every step with scripted arm poses (and once with the keyboard).
+    static func run() {
+        var failures = 0
+        for keyboard in [false, true] {
+            let shared = SharedControls()
+            let sp = Catalog.species("gull")
+            let g = Game(controls: shared, world: .meadow, mode: .freeRoam, species: sp, points: sp.base, terrainRadius: 3)
+            g.synchronousTerrain = true
+            g.setTutorialRings(false)
+            let host = Host(game: g, shared: shared)
+            let tut = TutorialController()
+            var t = 0.0
+            tut.clock = { t }
+            tut.host = host
+            tut.start()
+            var stepTimes: [String: Double] = [:]
+            var stepStart = 0.0
+            var last = tut.index
+            var phase: Float = 0
+            let end = 400.0
+            while t < end && host.finished == nil {
+                let step = tut.step.id
+                // What the "player" does for this step.
+                var eL: Float = 0.02, eR: Float = -0.02, reach: Float = 1
+                var steer: FlightInput?
+                g.keys = KeyInput()
+                let local = t - stepStart
+                switch step {
+                case "flap":
+                    let ph = Float(local) * 2 * .pi * 1.2
+                    eL = 0.25 + 0.85 * sin(ph); eR = eL
+                    if keyboard { g.keys.flap = true }
+                case "turn":
+                    let right = local.truncatingRemainder(dividingBy: 4) < 2
+                    eL = right ? 0.5 : -0.5; eR = -eL
+                    if keyboard { if right { g.keys.right = true } else { g.keys.left = true } }
+                case "up":
+                    eL = 0.45; eR = 0.45
+                    if keyboard { g.keys.up = true }
+                case "down":
+                    eL = -0.45; eR = -0.45
+                    if keyboard { g.keys.down = true }
+                case "dive":
+                    eL = -1.45; eR = -1.45; reach = 0.2
+                    if keyboard { g.keys.tuck = true }
+                case "rings":
+                    if let r = g.rings.next { steer = steerToward(g, r.center, phase: &phase, dt: 1.0 / 60) }
+                case "attack":
+                    // Fly at the nearest balloon and fire once locked on.
+                    if let target = g.practice?.active.min(by: { simd_distance($0.pos, g.flight.pos) < simd_distance($1.pos, g.flight.pos) }) {
+                        steer = steerToward(g, target.pos, phase: &phase, dt: 1.0 / 60)
+                        if g.lockTarget != nil && g.fighter.cooldown <= 0 { g.keys.attack = true }
+                    }
+                case "menu":
+                    if !host.paused && !host.tourStarted { host.paused = true; g.paused = true; tut.menuOpened() }
+                    else if host.tourStarted && host.paused && local > 3 { tut.menuTourFinished(); host.paused = false; g.paused = false }
+                default:
+                    break
+                }
+                g.debugSteer = steer.map { s in { _ in s } }
+                // Camera frames at 30 Hz, game at 60 Hz, tutorial ticks at 30 Hz.
+                if Int(t * 60) % 2 == 0 {
+                    if keyboard {
+                        shared.publish(ControlState(), pose: nil)
+                        if g.keys.any == false { g.keys.flap = step == "view" || step == "calibrate" }
+                    } else {
+                        let raw = pose(t, left: eL, right: eR, reach: reach)
+                        shared.publish(host.interp.process(raw, time: t), pose: raw)
+                    }
+                    tut.tick()
+                }
+                g.update(time: t)
+                if Int(t * 60) % 20 == 0 { RunLoop.main.run(until: Date()) }
+                t += 1.0 / 60
+                if tut.index != last || host.finished != nil {
+                    stepTimes[TutorialSteps.all[last].id] = t - stepStart
+                    stepStart = t
+                    last = tut.index
+                }
+            }
+            let label = keyboard ? "keyboard" : "arms"
+            if host.finished == true {
+                print("PASS  \(label): all \(TutorialSteps.all.count) steps in \(Int(t)) s   " +
+                      TutorialSteps.all.map { String(format: "%@ %.1fs", $0.id, stepTimes[$0.id] ?? -1) }.joined(separator: ", "))
+            } else {
+                failures += 1
+                print("FAIL  \(label): stuck on step \(tut.index + 1) (\(tut.step.id)) after \(Int(t)) s")
+            }
+        }
+        print(failures == 0 ? "ALL PASSED" : "\(failures) FAILED")
+    }
+}
+
+// MARK: - Update test
+
+/// `--update-test`: checks the feed named by BIRD_UPDATE_FEED, installs what it offers and exits once the helper has
+/// taken over (set BIRD_UPDATE_NO_RELAUNCH=1 so the new copy isn't opened). Exit 0 = handed over.
+enum UpdateTest {
+    static func run() {
+        var ok = true
+        func expect(_ c: Bool, _ what: String) { print((c ? "  ok  " : "  FAIL ") + what); if !c { ok = false } }
+        expect(Updater.isNewer("0.3", than: "0.2.1"), "0.3 > 0.2.1")
+        expect(Updater.isNewer("0.10", than: "0.9"), "0.10 > 0.9")
+        expect(Updater.isNewer("v1.0", than: "0.9.9"), "v1.0 > 0.9.9")
+        expect(!Updater.isNewer("0.3", than: "0.3.0"), "0.3 = 0.3.0")
+        expect(!Updater.isNewer("0.2.1", than: "0.3"), "0.2.1 < 0.3")
+        let sample = """
+        {"tag_name":"v0.4","html_url":"https://example.com/r","body":"Intro\\n- **Bold** thing\\n* `code` thing\\nnot a bullet",
+         "assets":[{"name":"notes.txt","browser_download_url":"https://example.com/n"},
+                   {"name":"BirdGame-0.4.dmg","browser_download_url":"https://example.com/b.dmg","size":123,"digest":"sha256:ABCDEF"}]}
+        """
+        let r = Updater.parse(Data(sample.utf8))
+        expect(r?.version == "0.4" && r?.tag == "v0.4", "parses the tag")
+        expect(r?.dmg.absoluteString == "https://example.com/b.dmg" && r?.size == 123, "finds the DMG asset")
+        expect(r?.sha256 == "abcdef", "reads the digest")
+        expect(r?.notes == ["Bold thing", "code thing"], "cleans up the notes: \(r?.notes ?? [])")
+        // A swap that didn't happen is noticed at the next launch (once), and one that did isn't.
+        let probe = Updater()
+        UserDefaults.standard.set("99.0", forKey: "update.pending")
+        expect(probe.checkLastInstall() == "99.0" && probe.installFailedBefore == "99.0", "notices an install that didn't go in")
+        expect(probe.checkLastInstall() == nil, "…only once")
+        UserDefaults.standard.set(AppVersion.short, forKey: "update.pending")
+        expect(Updater().checkLastInstall() == nil, "an install that went in is fine")
+        guard ok else { print("update-test: unit checks FAILED"); exit(1) }
+        guard ProcessInfo.processInfo.environment["BIRD_UPDATE_FEED"] != nil else { print("update-test: unit checks passed (no feed set)"); exit(0) }
+
+        let u = Updater()
+        print("update-test: running \(u.current) from \(Bundle.main.bundlePath)")
+        u.quit = { print("update-test: helper started, exiting"); fflush(stdout); exit(0) }
+        var lastPrinted = -1
+        u.onChange = { s in
+            if case .downloading(_, let p) = s {
+                let pct = Int(p * 100)
+                if pct / 25 != lastPrinted { lastPrinted = pct / 25; print("update-test: downloading \(pct)%") }
+            } else {
+                print("update-test: \(s)")
+            }
+            fflush(stdout)
+            switch s {
+            case .available: u.install()
+            case .upToDate, .failed, .offline, .manual: exit(1)
+            default: break
+            }
+        }
+        u.check()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 120) { print("update-test: timed out"); exit(1) }
+        RunLoop.main.run()
+    }
+}
+
+enum ObstacleShots {
+    /// `--obstacle-shots <dir>`: close-ups of the obstacles, standing and floating, in each world.
+    static func run(dir: String) {
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        for world in [WorldID.meadow, .volcano, .dogfight, .caves] {
+            let g = Game(controls: SharedControls(), world: world, terrainRadius: 4)
+            g.synchronousTerrain = true
+            g.bird.node.isHidden = true
+            let r = SCNRenderer(device: MTLCreateSystemDefaultDevice(), options: nil)
+            r.scene = g.scene
+            r.pointOfView = g.cameraNode
+            var t = 0.0
+            // A spot near the start (in the caves: inside the starting tunnel).
+            let o = g.flight.pos
+            let ground = TerrainShape.ground(o.x, o.z)
+            let terrain = TerrainShape.active
+            let items: [(String, (PathFrame) -> Obstacle)]
+            switch world {
+            case .meadow: items = [
+                ("stacks", { Pillars(style: .seaStack, frame: $0, top: $0.origin.y + 22) }),
+                ("stacks-floating", { Pillars(style: .seaStack, frame: $0, top: $0.origin.y + 22, floating: true) }),
+                ("arch", { StoneArch(frame: $0) }),
+                ("arch-floating", { StoneArch(frame: $0, floating: true) }),
+            ]
+            case .volcano: items = [
+                ("spires", { Pillars(style: .spire, frame: $0, radius: 4.6, top: $0.origin.y + 16) }),
+                ("spires-floating", { Pillars(style: .spire, frame: $0, radius: 4.6, top: $0.origin.y + 16, floating: true) }),
+            ]
+            case .dogfight: items = [
+                ("balloons", { Balloons(frame: $0, pathY: $0.origin.y) }),
+                ("barn", { Barn(frame: $0) }),
+                ("windmill", { Windmill(style: .farm, frame: $0, length: 12, phase: 0) }),
+                ("silos", { Pillars(style: .silo, frame: $0, count: 3, spacing: 30, offset: 6, radius: 4, top: $0.origin.y + 6) }),
+            ]
+            default: items = [
+                ("crushers", { Crushers(frame: $0, terrain: terrain) }),
+            ]
+            }
+            for (name, make) in items {
+                let floating = name.hasSuffix("floating")
+                let caves = world == .caves
+                let fwd = simd_normalize(SIMD3(g.flight.forward.x, 0, g.flight.forward.z))
+                let height: Float = floating ? 90 : 20
+                let c: SIMD3<Float> = caves ? o + fwd * 30 : SIMD3(o.x, ground + height, o.z - 40)
+                let f = PathFrame(c, caves ? fwd : SIMD3<Float>(0, 0, -1))
+                let obstacle = make(f)
+                g.scene.rootNode.addChildNode(obstacle.node)
+                var views: [(String, SIMD3<Float>)] = [("side", c + SIMD3<Float>(55, 8, 30)), ("low", c + SIMD3<Float>(-20, -12, 60))]
+                if caves {
+                    let back1: SIMD3<Float> = c - fwd * 26 + SIMD3<Float>(0, 1, 0)
+                    let back2: SIMD3<Float> = c - fwd * 16 + f.side * 3 - SIMD3<Float>(0, 2, 0)
+                    views = [("side", back1), ("low", back2)]
+                }
+                for (view, cam) in views {
+                    for _ in 0..<20 {
+                        g.update(time: t)
+                        obstacle.update(time: Float(t))
+                        g.terrain.update(center: c, synchronous: true)
+                        g.cameraNode.simdPosition = cam
+                        g.cameraNode.simdLook(at: c + SIMD3(0, caves ? 1 : 4, 0), up: kUp, localFront: SIMD3(0, 0, -1))
+                        g.cameraNode.camera?.fieldOfView = 55
+                        t += 1.0 / 30
+                    }
+                    let img = r.snapshot(atTime: t, with: CGSize(width: 960, height: 600), antialiasingMode: .multisampling4X)
+                    if let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+                       let png = rep.representation(using: .png, properties: [:]) {
+                        try? png.write(to: URL(fileURLWithPath: "\(dir)/\(world.rawValue)-\(name)-\(view).png"))
+                    }
+                }
+                obstacle.node.removeFromParentNode()
+            }
+        }
+    }
+}
+
+enum SoakTest {
+    /// `--soak-test [seconds]`: a long 5-bot fight with everyone dressed up (trails on), rendered offscreen, printing
+    /// memory now and then. Memory that keeps climbing means something leaks.
+    static func run(seconds: Double) {
+        func residentMB() -> Double {
+            var info = mach_task_basic_info()
+            var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
+            let kr = withUnsafeMutablePointer(to: &info) {
+                $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count) }
+            }
+            return kr == KERN_SUCCESS ? Double(info.resident_size) / 1_048_576 : -1
+        }
+        let bots = BotSettings.count
+        BotSettings.count = 5
+        defer { BotSettings.count = bots }
+        let sp = Catalog.species("phoenix")
+        let g = Game(controls: SharedControls(), world: .meadow, mode: .pvp, species: sp, points: sp.base,
+                     outfit: Outfit(code: "h=crown,e=visor,n=rainbowscarf,t=stardust,p=galaxy"), terrainRadius: 4)
+        g.synchronousTerrain = true
+        let r = SCNRenderer(device: MTLCreateSystemDefaultDevice(), options: nil)
+        r.scene = g.scene
+        r.pointOfView = g.cameraNode
+        var phase: Float = 0
+        g.debugSteer = { g in
+            guard let b = g.bots.filter({ $0.fighter.alive }).min(by: { simd_distance($0.flight.pos, g.flight.pos) < simd_distance($1.flight.pos, g.flight.pos) })
+            else { return nil }
+            return steerToward(g, b.flight.pos, phase: &phase, dt: 1.0 / 60)
+        }
+        let trails = ["rainbow", "fire", "neon", "confetti", "smoke", "hearts"]
+        var t = 0.0, nextPrint = 0.0, round = 0
+        var dressed = false
+        while t < seconds {
+            RunLoop.main.run(until: Date())
+            if !dressed && !g.bots.isEmpty {
+                for (i, b) in g.bots.enumerated() {
+                    b.avatar.setLook(species: b.avatar.speciesId, outfit: "h=tophat,e=aviators,n=scarf,t=\(trails[i % trails.count]),p=chrome")
+                }
+                dressed = true
+            }
+            g.keys.attack = true
+            g.fighter.shield = 99; g.fighter.health = Fighter.maxHealth
+            g.update(time: t)
+            _ = r.snapshot(atTime: t, with: CGSize(width: 320, height: 200), antialiasingMode: .none)
+            // A new round whenever this one ends, so knock-outs, respawns and fresh bots all get exercised.
+            if g.phase == .done { round += 1; dressed = false; g.enqueue { $0.restartMatch() } }
+            if t >= nextPrint {
+                print(String(format: "t=%4.0f s  memory %.0f MB  bots %d  projectiles %d  round %d", t, residentMB(), g.bots.count,
+                             g.combat.activeCount, round))
+                fflush(stdout)
+                nextPrint += 30
+            }
+            t += 1.0 / 60
+        }
+    }
+}
+
+enum RenderPathTest {
+    /// `--render-path-test <dir>`: draws the same frame through SceneKit's own snapshot and through the uncapped
+    /// V-Sync-off path (SCNRenderer into Metal textures), saves both, and checks the per-frame update still runs.
+    final class Counter: NSObject, SCNSceneRendererDelegate {
+        var updates = 0
+        func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) { updates += 1 }
+    }
+
+    static func run(dir: String) {
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let view = SCNView(frame: NSRect(x: 0, y: 0, width: 320, height: 200), options: nil)
+        print("SCNView colorPixelFormat \(view.colorPixelFormat.rawValue) depth \(view.depthPixelFormat.rawValue) layer \(type(of: view.layer as Any))")
+        if let ml = view.layer as? CAMetalLayer { print("  layer pixelFormat \(ml.pixelFormat.rawValue) colorspace \(String(describing: ml.colorspace?.name))") }
+        let g = Game(controls: SharedControls(), world: .meadow, terrainRadius: 4)
+        g.synchronousTerrain = true
+        for k in 0..<90 { g.update(time: Double(k) / 60) }
+        let device = MTLCreateSystemDefaultDevice()!
+        let size = CGSize(width: 960, height: 600)
+        let ref = SCNRenderer(device: device, options: nil)
+        ref.scene = g.scene; ref.pointOfView = g.cameraNode
+        save(ref.snapshot(atTime: 1.5, with: size, antialiasingMode: .multisampling4X), "\(dir)/reference.png")
+        for format in [MTLPixelFormat.bgra8Unorm, .bgra8Unorm_srgb] {
+            let r = SCNRenderer(device: device, options: nil)
+            let counter = Counter()
+            r.delegate = counter
+            r.scene = g.scene; r.pointOfView = g.cameraNode
+            guard let img = MetalFrame.render(r, device: device, size: size, format: format, samples: 4, times: 5) else { print("render failed"); continue }
+            save(img, "\(dir)/metal-\(format == .bgra8Unorm ? "unorm" : "srgb").png")
+            print("format \(format.rawValue): delegate updates \(counter.updates) for 5 frames")
+        }
+    }
+
+    static func save(_ img: NSImage, _ path: String) {
+        if let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff), let png = rep.representation(using: .png, properties: [:]) {
+            try? png.write(to: URL(fileURLWithPath: path))
+        }
+    }
+}
+
+/// Renders frames with an SCNRenderer into Metal textures and reads the last one back (for tests).
+enum MetalFrame {
+    static func render(_ r: SCNRenderer, device: MTLDevice, size: CGSize, format: MTLPixelFormat, samples: Int, times: Int) -> NSImage? {
+        let w = Int(size.width), h = Int(size.height)
+        func texture(_ f: MTLPixelFormat, _ n: Int, _ usage: MTLTextureUsage, _ mode: MTLStorageMode) -> MTLTexture? {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: f, width: w, height: h, mipmapped: false)
+            d.textureType = n > 1 ? .type2DMultisample : .type2D
+            d.sampleCount = n
+            d.usage = usage
+            d.storageMode = mode
+            return device.makeTexture(descriptor: d)
+        }
+        guard let queue = device.makeCommandQueue(),
+              let msaa = texture(format, samples, .renderTarget, .private),
+              let resolved = texture(format, 1, [.renderTarget, .shaderRead], .private),
+              let depth = texture(.depth32Float, samples, .renderTarget, .private),
+              let readback = device.makeBuffer(length: w * h * 4, options: .storageModeShared) else { return nil }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = msaa
+        pass.colorAttachments[0].resolveTexture = resolved
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .multisampleResolve
+        pass.depthAttachment.texture = depth
+        pass.depthAttachment.loadAction = .clear
+        pass.depthAttachment.storeAction = .dontCare
+        pass.depthAttachment.clearDepth = r.usesReverseZ ? 0 : 1
+        var last: MTLCommandBuffer?
+        for k in 0..<times {
+            guard let cb = queue.makeCommandBuffer() else { return nil }
+            r.render(atTime: 1.5 + Double(k) / 60, viewport: CGRect(origin: .zero, size: size), commandBuffer: cb, passDescriptor: pass)
+            if k == times - 1, let blit = cb.makeBlitCommandEncoder() {
+                blit.copy(from: resolved, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                          sourceSize: MTLSize(width: w, height: h, depth: 1), to: readback, destinationOffset: 0,
+                          destinationBytesPerRow: w * 4, destinationBytesPerImage: w * h * 4)
+                blit.endEncoding()
+            }
+            cb.commit()
+            last = cb
+        }
+        last?.waitUntilCompleted()
+        // BGRA bytes → image.
+        let data = Data(bytes: readback.contents(), count: w * h * 4)
+        guard let provider = CGDataProvider(data: data as CFData),
+              let cg = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+                               space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                               bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                               provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent) else { return nil }
+        return NSImage(cgImage: cg, size: size)
+    }
+}
+
+/// How fast this Mac can draw a scene with nothing holding it back: renders it offscreen, back to back, at a given size
+/// and antialiasing, and counts frames (the GPU included). Run it off the main thread while nothing else draws the scene.
+enum FrameRateTest {
+    static func run(scene: SCNScene, camera: SCNNode, device: MTLDevice, size: CGSize, samples: Int, seconds: Double) -> Double? {
+        let r = SCNRenderer(device: device, options: nil)
+        r.scene = scene
+        r.pointOfView = camera
+        guard let queue = device.makeCommandQueue() else { return nil }
+        let w = Int(size.width), h = Int(size.height)
+        func texture(_ format: MTLPixelFormat, samples n: Int) -> MTLTexture? {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: w, height: h, mipmapped: false)
+            d.textureType = n > 1 ? .type2DMultisample : .type2D
+            d.sampleCount = n
+            d.usage = [.renderTarget]
+            d.storageMode = .private
+            return device.makeTexture(descriptor: d)
+        }
+        guard let color = texture(.bgra8Unorm, samples: samples), let depth = texture(.depth32Float, samples: samples) else { return nil }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = color
+        pass.colorAttachments[0].loadAction = .clear
+        if samples > 1 {
+            guard let resolved = texture(.bgra8Unorm, samples: 1) else { return nil }
+            pass.colorAttachments[0].resolveTexture = resolved
+            pass.colorAttachments[0].storeAction = .multisampleResolve
+        } else {
+            pass.colorAttachments[0].storeAction = .store
+        }
+        pass.depthAttachment.texture = depth
+        pass.depthAttachment.loadAction = .clear
+        pass.depthAttachment.storeAction = .dontCare
+        pass.depthAttachment.clearDepth = r.usesReverseZ ? 0 : 1
+        let viewport = CGRect(origin: .zero, size: size)
+        var t = 0.0
+        func frame() -> MTLCommandBuffer? {
+            guard let cb = queue.makeCommandBuffer() else { return nil }
+            r.render(atTime: t, viewport: viewport, commandBuffer: cb, passDescriptor: pass)
+            cb.commit()
+            t += 1.0 / 60
+            return cb
+        }
+        // Warm up first (shaders compile on the first frames).
+        for _ in 0..<15 { frame()?.waitUntilCompleted() }
+        let start = CACurrentMediaTime()
+        var frames = 0
+        var inFlight: [MTLCommandBuffer] = []
+        while CACurrentMediaTime() - start < seconds {
+            guard let cb = frame() else { return nil }
+            inFlight.append(cb)
+            if inFlight.count >= 3 { inFlight.removeFirst().waitUntilCompleted() }
+            frames += 1
+        }
+        inFlight.forEach { $0.waitUntilCompleted() }
+        return Double(frames) / (CACurrentMediaTime() - start)
+    }
+}
+
+enum UncappedTest {
+    /// `--uncapped-test`: runs the V-Sync-off renderer (offscreen) and checks it goes past 60 fps, drops to 60 when
+    /// paced (menu open), sleeps when hidden, and stops cleanly.
+    final class Counter: NSObject, SCNSceneRendererDelegate {
+        private let lock = NSLock()
+        private var n = 0
+        var count: Int { lock.lock(); defer { lock.unlock() }; return n }
+        func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) { lock.lock(); n += 1; lock.unlock() }
+    }
+
+    static func run() {
+        var failures = 0
+        func check(_ ok: Bool, _ what: String) { if !ok { failures += 1 }; print("\(ok ? "PASS" : "FAIL")  \(what)") }
+        let g = Game(controls: SharedControls(), world: .meadow, terrainRadius: 4)
+        g.synchronousTerrain = true
+        for k in 0..<60 { g.update(time: Double(k) / 60) }
+        let counter = Counter()
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let u = UncappedView(device: device, delegate: counter, clock: { CACurrentMediaTime() }) else { print("FAIL  couldn't make the renderer"); exit(1) }
+        u.frame = NSRect(x: 0, y: 0, width: 1440, height: 900)
+        u.set(scene: g.scene, camera: g.cameraNode)
+        u.set(samples: 4)
+        func measure(_ seconds: Double) -> Double {
+            let a = counter.count, t0 = CACurrentMediaTime()
+            RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+            return Double(counter.count - a) / (CACurrentMediaTime() - t0)
+        }
+        u.start()
+        _ = measure(1)   // warm up (shaders)
+        let free = measure(3)
+        check(free > 70, String(format: "uncapped: %.0f fps at 2880x1800 with 4x MSAA", free))
+        u.set(visible: true, paced: true)
+        let paced = measure(2)
+        check(paced > 50 && paced < 66, String(format: "menu open: paced to %.0f fps", paced))
+        u.set(visible: false, paced: false)
+        _ = measure(0.2)
+        let hidden = measure(1)
+        check(hidden < 1, String(format: "hidden window: %.0f fps (sleeping)", hidden))
+        u.set(visible: true, paced: false)
+        _ = measure(0.5)
+        let t0 = CACurrentMediaTime()
+        u.stop()
+        check(CACurrentMediaTime() - t0 < 0.5, String(format: "stops in %.0f ms", (CACurrentMediaTime() - t0) * 1000))
+        let after = counter.count
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        check(counter.count == after, "no frames after stopping")
+        print(failures == 0 ? "ALL PASSED" : "\(failures) FAILED")
     }
 }

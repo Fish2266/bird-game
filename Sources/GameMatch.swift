@@ -13,6 +13,7 @@ extension Game {
 
     private func name(of id: Int) -> String {
         if id == localId { return "You" }
+        if PracticeTargets.isPractice(id) { return "the target" }
         if let b = bots.first(where: { $0.id == id }) { return b.avatar.name }
         return others[id]?.name ?? peers.first { $0.id == id }?.name ?? "Someone"
     }
@@ -46,6 +47,8 @@ extension Game {
         pathHint = 0
         progressS = 0
         offCourseFor = 0
+        stuckFor = 0
+        stuckBest = 0
         lastSafeS = 0
         finishTime = nil
         splitText = nil
@@ -136,6 +139,17 @@ extension Game {
     func joinAsSpectator() {
         participating = false
         banner = "Round in progress — you'll join the next one"
+    }
+
+    /// Things to compile shaders for before play starts, so the first fireball, knock-out or ghost doesn't stutter.
+    func warmupObjects() -> [Any] {
+        var warm: [Any] = [scene]
+        if mode == .pvp || multiplayer {
+            warm += Combat.warmupNodes() as [Any]
+            warm.append(OtherBird.featherPuff(color: .white))
+        }
+        if let run = bestRun { warm.append(GhostBird(run: run).bird.node) }
+        return warm
     }
 
     func setBest(time: Double?, run: GhostRun?) {
@@ -297,6 +311,20 @@ extension Game {
         } else {
             offCourseFor = max(0, offCourseFor - dt * 2)
         }
+
+        // So does getting nowhere for a while (wedged against something, or lost).
+        if progressS > stuckBest + 12 {
+            stuckBest = progressS
+            stuckFor = 0
+        } else {
+            stuckFor += dt
+            let limit: Float = 14
+            if stuckFor > limit {
+                backOnCourse()
+            } else if stuckFor > limit - 5 {
+                matchWarning = "Stuck? Back to the last \(mode == .ringRace ? "ring" : "checkpoint") in \(Int(ceil(limit - stuckFor)))\u{2026}"
+            }
+        }
     }
 
     private func resolveGate(_ track: RaceTrack, passed: Bool) {
@@ -357,6 +385,8 @@ extension Game {
         pathHint = track.index(atArc: lastSafeS)
         progressS = lastSafeS
         offCourseFor = 0
+        stuckFor = 0
+        stuckBest = lastSafeS
         notice("Back on course")
     }
 
@@ -441,6 +471,7 @@ extension Game {
         for o in others.values where o.alive && !o.spectator && !o.paused && o.id != id {
             t.append(CombatTarget(id: o.id, pos: o.pos, vel: o.vel))
         }
+        if let p = practice { t += p.active }
         return t
     }
 
@@ -504,6 +535,10 @@ extension Game {
 
     /// Deliver a hit decided on this machine.
     private func route(_ h: HitReport) {
+        if PracticeTargets.isPractice(h.to) {
+            if practice?.hit(h.to) == true { sound?.chime(); shake = min(1, shake + 0.15) }
+            return
+        }
         if h.from == localId && h.to != localId && h.source == .shot { hitsLanded += 1 }
         if h.to == localId {
             applyToMe(h)
@@ -678,9 +713,9 @@ extension Game {
         for info in p where info.id != localId {
             if let o = others[info.id] {
                 o.setIdentity(name: info.name, color: info.color)
-                if o.idle { o.setSpecies(info.bird) }
+                if o.idle { o.setLook(species: info.bird, outfit: info.fit) }
             } else {
-                let o = OtherBird(id: info.id, name: info.name, color: info.color, species: info.bird)
+                let o = OtherBird(id: info.id, name: info.name, color: info.color, species: info.bird, outfit: info.fit)
                 others[info.id] = o
                 othersRoot.addChildNode(o.root)
             }
@@ -739,7 +774,7 @@ extension Game {
         if fighter.burnTime > 0 { f |= NetState.burning }
         let prog = Float(nextGate) + (finishTime != nil ? 1 : 0) + (track.map { progressS / max($0.length, 1) } ?? 0) * 0.001
         link.send(state: NetState(id: localId, p: flight.pos, q: flight.orientation.vector, v: flight.velocity, w: wingState,
-                                  hp: fighter.health, flags: f, bird: species.id, progress: prog, lives: fighter.lives, t: now))
+                                  hp: fighter.health, flags: f, bird: species.id, progress: prog, lives: fighter.lives, t: now, fit: outfit.code))
     }
 
     // MARK: HUD
@@ -858,4 +893,6 @@ struct PeerInfo: Codable, Equatable {
     var name: String
     var color: Int
     var bird: String
+    /// Outfit code (hat, glasses, trail…).
+    var fit = ""
 }

@@ -107,12 +107,17 @@ final class ChatOverlay: NSView, NSTextFieldDelegate {
         return v
     }
 
+    /// Show messages over the game (Settings). Typing (T) still shows the conversation while the box is open.
+    var showsLines = true { didSet { updateLines() } }
+    private func updateLines() { lines.isHidden = !(showsLines || typing) }
+
     func add(_ l: ChatLine) { lines.add(l) }
     func reset() { lines.entries = [] }
 
     func open() {
         guard !typing else { return }
         typing = true
+        updateLines()
         field.isHidden = false
         field.stringValue = ""
         lines.fadeAfter = nil
@@ -123,6 +128,7 @@ final class ChatOverlay: NSView, NSTextFieldDelegate {
     func close() {
         guard typing else { return }
         typing = false
+        updateLines()
         field.isHidden = true
         field.stringValue = ""
         // Everything already read fades away now.

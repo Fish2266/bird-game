@@ -193,7 +193,7 @@ final class PlayPanel: FlippedView {
         switch mode {
         case .freeRoam:
             rows = ["The original game: fly anywhere and chase endless rings.", w.isChallenge ? "Hazards: \(w.hazards)" : "No hazards — just fly.",
-                    "Rings earn coins (×\(Int(w.ringMultiplier)) here)."]
+                    "Rings earn coins (\(w.multiplierText) here)."]
         case .ringRace, .speedRace:
             let best = progress.bestTime(mode, w.id).map(raceClock) ?? "—"
             let medal = progress.bestMedal(mode, w.id).map { " (\($0.name))" } ?? ""

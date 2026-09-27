@@ -53,6 +53,14 @@ final class BirdSynth {
     var wingDown: (Float, Float) = (0, 0)  // downstroke angular speed per wing, rad/s
     var wingUp: (Float, Float) = (0, 0)    // upstroke angular speed, rad/s
     var volume: Float = 0.85
+    /// Menu / reward sounds have their own volume: they still play in the pause menu (where the world is silenced).
+    var uiVolume: Float = 0.85
+    private let uiCount = 24
+    private let uiT = UnsafeMutablePointer<Float>.allocate(capacity: 24)
+    private let uiF = UnsafeMutablePointer<Float>.allocate(capacity: 24)
+    private let uiG = UnsafeMutablePointer<Float>.allocate(capacity: 24)
+    private let uiLen = UnsafeMutablePointer<Float>.allocate(capacity: 24)
+    private var uiNext = 0
 
     // One-shots
     private var chimeT: Float = 10, chimePhase: (Float, Float, Float) = (0, 0, 0)
@@ -109,6 +117,7 @@ final class BirdSynth {
     init(sampleRate: Float) {
         sr = sampleRate
         for i in 0..<16 { shotT[i] = 1; shotGain[i] = 0; shotPan[i] = 0 }
+        for i in 0..<24 { uiT[i] = 10; uiF[i] = 440; uiG[i] = 0; uiLen[i] = 0 }
         rumble.set(55, q: 0.7, sr: sr)
         rush.set(3200, q: 0.7, sr: sr)
         stallF.set(1400, q: 1.3, sr: sr)
@@ -120,6 +129,30 @@ final class BirdSynth {
     }
 
     func chime() { chimeT = 0; chimePhase = (0, 0, 0) }
+
+    /// A soft bell note for the menus (`delay` seconds from now).
+    func uiNote(_ freq: Float, delay: Float = 0, length: Float = 0.4, gain: Float = 0.1) {
+        let i = uiNext % uiCount
+        uiF[i] = freq; uiG[i] = gain; uiLen[i] = length; uiT[i] = -delay
+        uiNext = i + 1
+    }
+    /// Bought something: a quick rising arpeggio.
+    func purchase() {
+        for (k, f) in [523.25, 659.25, 783.99, 1046.5].enumerated() { uiNote(Float(f), delay: Float(k) * 0.065, length: 0.45, gain: 0.1) }
+    }
+    /// Finished a goal: a little fanfare with a sparkle on top.
+    func fanfare() {
+        for (k, f) in [392.0, 523.25, 659.25].enumerated() { uiNote(Float(f), delay: Float(k) * 0.11, length: 0.3, gain: 0.1) }
+        uiNote(783.99, delay: 0.33, length: 0.9, gain: 0.12)
+        uiNote(1046.5, delay: 0.33, length: 0.9, gain: 0.07)
+        for k in 0..<4 { uiNote(2093 + Float(k) * 330, delay: 0.45 + Float(k) * 0.06, length: 0.25, gain: 0.03) }
+    }
+    /// A tutorial step done: two bright notes.
+    func success() {
+        uiNote(783.99, delay: 0, length: 0.3, gain: 0.09)
+        uiNote(1174.66, delay: 0.09, length: 0.5, gain: 0.09)
+    }
+    func click() { uiNote(1567.98, length: 0.07, gain: 0.05) }
     /// Countdown blip (a longer, higher one for GO).
     func beep(go: Bool) { beepT = 0; beepPhase = 0; beepFreq = go ? 1318.5 : 659.3; beepLen = go ? 0.45 : 0.16 }
     func eruption(_ strength: Float) { boom = max(boom, strength); blast = max(blast, strength); boomPhase = 0 }
@@ -335,8 +368,19 @@ final class BirdSynth {
                     l += dry + delayed * 0.8; r += dry * 0.6 + delayed
                 }
 
-                L[j] = tanh(l * 0.9) * vol
-                R[j] = tanh(r * 0.9) * vol
+                // Menu sounds
+                var ui: Float = 0
+                for k in 0..<uiCount where uiT[k] < uiLen[k] {
+                    let t = uiT[k]
+                    uiT[k] = t + dtS
+                    guard t >= 0 else { continue }
+                    let env = min(1, t * 300) * exp(-t * 5.5)
+                    let ph = 2 * Float.pi * uiF[k] * t
+                    ui += (sin(ph) + 0.25 * sin(ph * 2) + 0.08 * sin(ph * 3)) * env * uiG[k]
+                }
+                let uiOut = tanh(ui * 0.9) * uiVolume
+                L[j] = tanh(l * 0.9) * vol + uiOut
+                R[j] = tanh(r * 0.9) * vol + uiOut
             }
             i += m
         }
@@ -378,6 +422,12 @@ final class SoundEngine {
     func beep(go: Bool) { synth.beep(go: go) }
     func impact(_ strength: Float, water: Bool) { synth.impact(strength, water: water) }
     func setMuted(_ m: Bool) { muted = m; synth.volume = m ? 0 : 0.85 }
+    /// Menu and reward sounds (only silenced by the player's own mute, not by pausing).
+    func setUIMuted(_ m: Bool) { synth.uiVolume = m ? 0 : 0.85 }
+    func purchase() { synth.purchase() }
+    func fanfare() { synth.fanfare() }
+    func success() { synth.success() }
+    func click() { synth.click() }
     func setRumble(_ v: Float) { synth.volcanoRumble = v }
     func eruption(_ strength: Float) { synth.eruption(strength) }
     func setEngines(_ e: [(Float, Float, Float)]) {
@@ -391,4 +441,9 @@ final class SoundEngine {
     func setCaveAmbience(_ on: Bool) { synth.caveAmbience = on }
     /// Silence all world-specific loops (used when switching worlds).
     func resetWorld() { synth.volcanoRumble = 0; synth.engGainT = .zero; synth.caveAmbience = false }
+}
+
+/// The app's sound engine, for menus that play a sound of their own.
+enum Sounds {
+    static weak var shared: SoundEngine?
 }

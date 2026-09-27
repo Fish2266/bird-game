@@ -21,6 +21,15 @@ final class GameSCNView: SCNView {
 
     override func keyDown(with e: NSEvent) {
         app?.cheatKey(e.charactersIgnoringModifiers ?? "")
+        // The welcome card: Return starts the tutorial, Esc closes it. (What's new: Return closes it too.)
+        if let app, let card = app.welcome, !e.isARepeat {
+            if e.keyCode == 36 || e.keyCode == 76 {
+                if case .firstLaunch = card.kind { app.welcomeStartTutorial() } else { app.dismissWelcome() }
+                return
+            }
+            if e.keyCode == 53 { app.dismissWelcome(); return }
+        }
+        if e.keyCode == 48 && !e.isARepeat { app?.tutorialKey(back: e.modifierFlags.contains(.shift)); return }
         if setKey(e.keyCode, true) { return }
         guard !e.isARepeat else { return }
         if e.keyCode == 53 { app?.togglePause(); return }
@@ -35,6 +44,8 @@ final class GameSCNView: SCNView {
         case "e": app?.attack()
         case "j": app?.acceptInvite()
         case "t": app?.openChat()
+        case "p": app?.takePhoto()
+        case "[", "]", ";", "'", ",", ".": break   // test codes (no error beep)
         default: super.keyDown(with: e)
         }
     }
@@ -72,6 +83,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
     private var inviteHide: DispatchWorkItem?
     private var warmupTimer: DispatchWorkItem?
     private var terminating = false
+    let tutorial = TutorialController()
+    let updater = Updater()
+    /// The "update to x?" card, while it's up.
+    private var updateCard: UpdateCard?
+    /// Versions already announced with a toast this launch.
+    private var announcedUpdate: String?
+    /// An update found while the welcome card was up (announced once it closes).
+    private var toastAfterWelcome: String?
+    private var updateTimer: Timer?
+    /// Draws instead of SceneKit's view while V-Sync is off.
+    private var uncapped: UncappedView?
+    private var autoUpdateItem: NSMenuItem?
+    /// Welcome (first launch) or what's-new card, while it's up.
+    private(set) var welcome: WelcomeView?
     /// 0…1, saved between launches; 100% by default.
     var hudOpacity: CGFloat = UserDefaults.standard.object(forKey: "hudOpacity") as? CGFloat ?? 1 {
         didSet {
@@ -98,6 +123,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         window.backgroundColor = .black
 
         sound = SoundEngine()
+        Sounds.shared = sound
+        muted = Prefs.muted
+        sound?.setMuted(muted)
+        sound?.setUIMuted(muted)
         loadProfile()
         let game = makeGame(startWorld(), mode: startMode())
 
@@ -110,23 +139,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         scnView.rendersContinuously = true
         scnView.isPlaying = true
         scnView.preferredFramesPerSecond = 60
-        scnView.antialiasingMode = .multisampling4X
+        scnView.antialiasingMode = GraphicsQuality.current.antialiasing
+        applyVSync()
         scnView.backgroundColor = Sky.fogColor
         window.contentView!.addSubview(scnView)
 
         hud = HUDView(frame: window.contentView!.bounds)
         hud.autoresizingMask = [.width, .height]
         hud.alphaValue = hudOpacity
+        hud.showPreview = Prefs.showPreview
+        hud.showFPS = Prefs.showFPS
         window.contentView!.addSubview(hud)
 
         chatView = ChatOverlay(frame: window.contentView!.bounds)
         chatView.autoresizingMask = [.width, .height]
         chatView.onSend = { [weak self] text in self?.lan.say(text) }
+        chatView.showsLines = Prefs.showChat
         chatView.onClose = { [weak self] in
             guard let self, !self.isPaused else { return }
             self.window.makeFirstResponder(self.scnView)
         }
         window.contentView!.addSubview(chatView)
+
+        tutorial.host = self
+        tutorial.overlay.frame = window.contentView!.bounds
+        tutorial.overlay.autoresizingMask = [.width, .height]
+        tutorial.overlay.isHidden = true
+        window.contentView!.addSubview(tutorial.overlay)
 
         pauseMenu = PauseMenuView(progress: progress, lan: lan)
         pauseMenu.frame = window.contentView!.bounds
@@ -136,7 +175,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         wirePauseMenu()
         wireLAN()
 
+        wireUpdater()
+        // The Style tab's pictures, made in the background once the game is up so the tab opens with them ready.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { CosmeticThumbs.warmUp() }
         hud.setCoins(progress.coins)
+        // Players coming from 0.2 may already have done some goals.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.checkGoals() }
+        if !CommandLine.arguments.contains("--demo") && !CommandLine.arguments.contains("--no-welcome") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.showWelcomeIfNeeded() }
+        }
 
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(scnView)
@@ -188,22 +235,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
                 }
             }
         }
-        if let i = a.firstIndex(of: "--snapshot-after"), i + 2 < a.count, let t = Double(a[i + 1]) {
+        // `--snapshot-after <s> <file.png>` (repeatable): the 3D view with every overlay on top.
+        var k = 0
+        while let i = a[k...].firstIndex(of: "--snapshot-after"), i + 2 < a.count, let t = Double(a[i + 1]) {
             let path = a[i + 2]
+            k = i + 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + t) { [weak self] in self?.saveSnapshot(path) }
+        }
+        // `--start-tutorial [s]`: start the tutorial after a moment (for testing).
+        if let i = a.firstIndex(of: "--start-tutorial") {
+            let t = i + 1 < a.count ? Double(a[i + 1]) ?? 1 : 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + t) { [weak self] in self?.startTutorial() }
+        }
+        // `--tutorial-step <n> <s>`: jump to a step after s seconds.
+        if let i = a.firstIndex(of: "--tutorial-step"), i + 2 < a.count, let n = Int(a[i + 1]), let t = Double(a[i + 2]) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + t) { [weak self] in self?.tutorial.go(to: n) }
+        }
+        // `--pause-after <s> [tab]`: open the menu (on a tab) for snapshots.
+        if let i = a.firstIndex(of: "--pause-after"), i + 1 < a.count, let t = Double(a[i + 1]) {
+            let tab = i + 2 < a.count ? MenuTab.allCases.first { $0.title.lowercased() == a[i + 2] } : nil
             DispatchQueue.main.asyncAfter(deadline: .now() + t) { [weak self] in
-                guard let self, let v = self.window.contentView else { return }
-                let img = NSImage(size: v.bounds.size)
-                img.lockFocus()
-                self.scnView.snapshot().draw(in: v.bounds)
-                if let rep = self.hud.bitmapImageRepForCachingDisplay(in: self.hud.bounds) {
-                    self.hud.cacheDisplay(in: self.hud.bounds, to: rep)
-                    rep.draw(in: v.bounds)
-                }
-                img.unlockFocus()
-                if let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) {
-                    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
-                }
+                guard let self else { return }
+                if !self.isPaused { self.togglePause() }
+                if let tab { self.pauseMenu.select(tab: tab) }
             }
+        }
+        if let i = a.firstIndex(of: "--quit-after"), i + 1 < a.count, let t = Double(a[i + 1]) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + t) { NSApp.terminate(nil) }
+        }
+        if a.contains("--welcome") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.present(WelcomeView(kind: .firstLaunch)) }
+        }
+    }
+
+    /// Everything on screen into a PNG (the SceneKit view doesn't draw through `cacheDisplay`, so it's composited).
+    private func saveSnapshot(_ path: String) {
+        guard let v = window.contentView else { return }
+        let img = NSImage(size: v.bounds.size)
+        img.lockFocus()
+        scnView.snapshot().draw(in: v.bounds)
+        for sub in v.subviews where sub !== scnView && !sub.isHidden {
+            if let rep = sub.bitmapImageRepForCachingDisplay(in: sub.bounds) {
+                sub.cacheDisplay(in: sub.bounds, to: rep)
+                rep.draw(in: sub.frame)
+            }
+        }
+        img.unlockFocus()
+        if let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) {
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
         }
     }
 
@@ -218,23 +297,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
 
     func togglePause() {
         guard let game else { return }
+        if welcome != nil { dismissWelcome() }
         chatView.close()
         isPaused.toggle()
+        tutorial.overlay.isHidden = isPaused || !tutorial.active
         chatView.isHidden = isPaused
         game.keys = KeyInput()
         game.paused = isPaused
+        updateUncapped()
         sound?.setMuted(isPaused || muted)
         if isPaused {
-            pauseMenu.setSettings(sound: !muted, preview: hud.showPreview, help: hud.showHelp, hudOpacity: hudOpacity,
-                                  cameras: CameraManager.availableDevices().map { ($0.uniqueID, $0.localizedName) },
-                                  current: camera.device?.uniqueID)
+            pauseMenu.setSettings(settingsValues)
             pauseMenu.setPlaying(mode: currentMode, world: currentWorld)
             lan.refreshDiagnostics()
             pauseMenu.willShow()
             pauseMenu.isHidden = false
             hud.isHidden = true
             window.makeFirstResponder(pauseMenu)
+            tutorial.menuOpened()
         } else {
+            if updateCard != nil { hideUpdateCard() }
+            pauseMenu.endTour()
             pauseMenu.isHidden = true
             pauseMenu.didHide()
             hud.isHidden = false
@@ -247,14 +330,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         pauseMenu.onResume = { [weak self] in self?.togglePause() }
         pauseMenu.onRestart = { [weak self] in self?.restart(); self?.togglePause() }
         pauseMenu.onRecalibrate = { [weak self] in self?.recalibrate(); self?.togglePause() }
-        pauseMenu.onSound = { [weak self] on in self?.muted = !on }
-        pauseMenu.onPreview = { [weak self] on in self?.hud.showPreview = on }
-        pauseMenu.onHelp = { [weak self] on in self?.hud.showHelp = on }
-        pauseMenu.onHUDOpacity = { [weak self] v in self?.hudOpacity = v }
-        pauseMenu.onCamera = { [weak self] id in
+        let settings = pauseMenu.settings
+        settings.onSound = { [weak self] on in self?.setMuted(!on) }
+        settings.onHelp = { [weak self] on in self?.hud.showHelp = on }
+        settings.onChat = { [weak self] on in Prefs.showChat = on; self?.chatView.showsLines = on }
+        settings.onFPS = { [weak self] on in Prefs.showFPS = on; self?.hud.showFPS = on }
+        settings.onHUDOpacity = { [weak self] v in self?.hudOpacity = v }
+        settings.onPreview = { [weak self] on in Prefs.showPreview = on; self?.hud.showPreview = on }
+        settings.onCamera = { [weak self] id in
             guard let self, let d = CameraManager.availableDevices().first(where: { $0.uniqueID == id }) else { return }
             self.camera.start(with: d)
         }
+        settings.onGraphics = { [weak self] q in self?.setGraphics(q) }
+        settings.onVSync = { [weak self] on in Prefs.vsync = on; self?.applyVSync() }
+        settings.onAutoUpdate = { [weak self] on in self?.setAutoUpdate(on) }
         pauseMenu.onBirdChanged = { [weak self] sp in self?.applyBird(sp) }
         pauseMenu.onWorldChanged = { [weak self] in self?.travel() }
         pauseMenu.onKey = { [weak self] chars in self?.cheatKey(chars) }
@@ -267,27 +356,245 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
             UserDefaults.standard.set(true, forKey: "lan.used")
             self?.lan.goOnline()
         }
+        pauseMenu.onOutfitChanged = { [weak self] _ in self?.outfitChanged() }
+        pauseMenu.onTutorial = { [weak self] in self?.startTutorial() }
+    }
+
+    // MARK: Updates
+
+    private func wireUpdater() {
+        updater.onChange = { [weak self] s in self?.updateStateChanged(s) }
+        pauseMenu.onUpdateAction = { [weak self] in self?.updateAction() }
+        let a = CommandLine.arguments
+        guard !a.contains("--demo"), !a.contains("--no-update-check") else { return }
+        if let failed = updater.checkLastInstall() {
+            // The last update didn't go in: say so, and offer the download page instead.
+            announcedUpdate = failed
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                self?.hud.showToast("Bird Game \(failed) didn't install", "Open the menu (Esc) to download it instead", color: Wii.blue)
+                self?.updater.check()
+            }
+        } else {
+            // A few seconds in (so launching stays quick)...
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.updater.checkIfDue() }
+        }
+        // ...then every hour it checks whether 6 hours have passed.
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in self?.updater.checkIfDue() }
+    }
+
+    private func updateStateChanged(_ s: Updater.State) {
+        pauseMenu.updateRow.show(s, current: AppVersion.short)
+        updateCard?.show(s, lanNote: updateLANNote)
+        switch s {
+        case .available(let r), .manual(let r, _):
+            // Say so once (not in the middle of the tutorial; the menu row shows it either way).
+            guard announcedUpdate != r.version, !tutorial.active, !isPaused else { return }
+            // Behind the welcome card it would go unseen: wait until it's closed.
+            guard welcome == nil else { toastAfterWelcome = r.version; return }
+            announcedUpdate = r.version
+            hud.showToast("Bird Game \(r.version) is here!", "Open the menu (Esc) to update", color: Wii.blue)
+        case .idle, .upToDate, .offline:
+            // A cancelled or finished check leaves nothing for the card to show.
+            if updateCard != nil { hideUpdateCard() }
+        default:
+            break
+        }
+    }
+
+    /// The menu row's button.
+    private func updateAction() {
+        switch updater.state {
+        case .available, .manual:
+            showUpdateCard()
+        case .failed:
+            updater.retry()
+            if case .available = updater.state { showUpdateCard() }
+        case .idle, .upToDate, .offline:
+            updater.check()
+        case .checking, .downloading, .installing:
+            showUpdateCard()
+        }
+    }
+
+    /// What restarting for an update does to the LAN game.
+    private var updateLANNote: String? {
+        switch lan.role {
+        case .hosting: return "The LAN game you're hosting will end for everyone."
+        case .joined: return "You'll leave the LAN game."
+        default: return nil
+        }
+    }
+
+    private func showUpdateCard() {
+        if updateCard == nil {
+            let card = UpdateCard(frame: window.contentView!.bounds)
+            card.autoresizingMask = [.width, .height]
+            card.onInstall = { [weak self] in
+                guard let self else { return }
+                if case .failed = self.updater.state { self.updater.retry() }
+                self.updater.install()
+            }
+            card.onCancel = { [weak self] in
+                guard let self else { return }
+                switch self.updater.state {
+                case .downloading: self.updater.cancel()
+                case .installing: return
+                case .failed: self.updater.dismissFailure(); self.hideUpdateCard()
+                default: self.hideUpdateCard()
+                }
+            }
+            card.onOpenPage = { [weak self] in
+                guard let self else { return }
+                if case .manual(let r, _) = self.updater.state { NSWorkspace.shared.open(r.page) }
+                self.hideUpdateCard()
+            }
+            window.contentView!.addSubview(card)
+            updateCard = card
+        }
+        updateCard?.show(updater.state, lanNote: updateLANNote)
+        window.makeFirstResponder(updateCard)
+    }
+
+    private func hideUpdateCard() {
+        updateCard?.removeFromSuperview()
+        updateCard = nil
+        window.makeFirstResponder(isPaused ? pauseMenu : scnView)
+    }
+
+    // MARK: Tutorial & welcome
+
+    /// First launch: welcome card (tutorial recommended). After an update: what's new.
+    private func showWelcomeIfNeeded() {
+        let d = UserDefaults.standard
+        let version = AppVersion.short
+        let newPlayer = progress.coinsEarned == 0 && progress.totalRings == 0 && !progress.tutorialDone
+        if newPlayer && !d.bool(forKey: "welcome.shown") {
+            d.set(true, forKey: "welcome.shown")
+            d.set(version, forKey: "whatsNew.seen")
+            present(WelcomeView(kind: .firstLaunch))
+        } else if !newPlayer && d.string(forKey: "whatsNew.seen") != version, let notes = WelcomeView.whatsNew(for: version) {
+            d.set(true, forKey: "welcome.shown")
+            d.set(version, forKey: "whatsNew.seen")
+            present(WelcomeView(kind: .whatsNew(version, notes)))
+        } else {
+            d.set(version, forKey: "whatsNew.seen")
+        }
+    }
+
+    private func present(_ w: WelcomeView) {
+        guard !isPaused else { return }
+        w.frame = window.contentView!.bounds
+        w.autoresizingMask = [.width, .height]
+        w.onTutorial = { [weak self] in self?.welcomeStartTutorial() }
+        w.onDismiss = { [weak self] in self?.dismissWelcome() }
+        window.contentView!.addSubview(w, positioned: .below, relativeTo: pauseMenu)
+        welcome = w
+    }
+
+    func dismissWelcome() {
+        welcome?.removeFromSuperview()
+        welcome = nil
+        window.makeFirstResponder(scnView)
+        if toastAfterWelcome != nil {
+            toastAfterWelcome = nil
+            updateStateChanged(updater.state)
+        }
+    }
+
+    func welcomeStartTutorial() {
+        toastAfterWelcome = nil   // no update message over the tutorial (the menu still shows it)
+        dismissWelcome()
+        startTutorial()
+    }
+
+    /// Start (or restart) the tutorial in the Home Isles.
+    func startTutorial() {
+        guard !inMultiplayer, lan.role != .joining else {
+            NSSound.beep()
+            if isPaused { togglePause() }
+            hud.showNotice("Leave the LAN game to start the tutorial")
+            return
+        }
+        if tutorial.active { tutorial.stop(completed: false) }
+        if isPaused { togglePause() }
+        let world = WorldCatalog.info("meadow")
+        progress.selectWorld(world)
+        let g = makeGame(.meadow, mode: .freeRoam)
+        g.setTutorialRings(false)
+        hud.showHelp = false
+        hud.showResults(nil)
+        tutorial.start()
+        tutorial.overlay.isHidden = false
+        window.makeFirstResponder(scnView)
+        Log.write("tutorial started")
+    }
+
+    /// Tab: next step; Shift-Tab: back.
+    func tutorialKey(back: Bool) {
+        guard tutorial.active, !isPaused else { return }
+        if back { tutorial.back() } else { tutorial.next() }
+    }
+
+    /// Bought, wore or took off a cosmetic: dress the bird and tell everyone in the LAN game.
+    private func outfitChanged() {
+        let sp = progress.selected
+        game?.setSpecies(sp, points: progress.points(sp), outfit: progress.outfit)
+        lan.fit = progress.outfit.code
+        lan.updateProfile()
+        hud.setCoins(progress.coins)
+        checkGoals()
+        pauseMenu.refresh()
+    }
+
+    /// Pay out any goals just reached and say so.
+    func checkGoals() {
+        let done = progress.checkGoals()
+        guard !done.isEmpty else { return }
+        for g in done {
+            // A cosmetic reward says where to find it (it's only put on when that slot was empty).
+            let detail = g.cosmetic != nil ? "\(g.rewardText)  ·  it's in Style (Esc)" : (g.rewardText.isEmpty ? g.detail : "\(g.detail)  ·  \(g.rewardText)")
+            hud.showToast("Goal complete: \(g.title)", detail)
+        }
+        sound?.fanfare()
+        hud.setCoins(progress.coins)
+        // A goal can hand out a cosmetic (worn straight away).
+        let sp = progress.selected
+        game?.setSpecies(sp, points: progress.points(sp), outfit: progress.outfit)
+        lan.fit = progress.outfit.code
+        lan.updateProfile()
+        if isPaused { pauseMenu.refresh() }
     }
 
     // MARK: Test coins
 
-    /// Typing [ ] ; ' in a row grants 100 coins; the reverse ' ; ] [ wipes all saved progress.
+    /// Test codes, typed in a row in the game or the menu: [ ] ; ' grants 100 coins, the reverse ' ; ] [ wipes all saved
+    /// progress (coins, birds, outfits, everything), and , . , . , . , . unlocks every cosmetic.
     private var cheatBuffer = ""
     func cheatKey(_ chars: String) {
-        let grant = "[];'", wipe = "';]["
-        guard chars.count == 1, grant.contains(chars) else { cheatBuffer = ""; return }
-        cheatBuffer = String((cheatBuffer + chars).suffix(4))
-        if cheatBuffer == grant {
+        let grant = "[];'", wipe = "';][", wardrobe = ",.,.,.,."
+        guard chars.count == 1, (grant + wardrobe).contains(chars) else { cheatBuffer = ""; return }
+        cheatBuffer = String((cheatBuffer + chars).suffix(wardrobe.count))
+        if cheatBuffer.hasSuffix(grant) {
             cheatBuffer = ""
             progress.grant(100)
             hud.showBonus(coins: 100, total: progress.coins)
             if isPaused { pauseMenu.refresh() }
-        } else if cheatBuffer == wipe {
+        } else if cheatBuffer.hasSuffix(wipe) {
             cheatBuffer = ""
             resetEverything()
+        } else if cheatBuffer == wardrobe {
+            cheatBuffer = ""
+            let n = progress.unlockAllCosmetics()
+            hud.showToast("Every cosmetic unlocked", n > 0 ? "\(n) new things to wear in Style (Esc)" : "You already had them all",
+                          color: Rarity.legendary.color)
+            sound?.purchase()
+            Log.write("test code: unlocked \(n) cosmetics")
+            checkGoals()
+            if isPaused { pauseMenu.refresh() }
         }
     }
 
+    /// Back to a brand-new player: no coins, birds, worlds, outfits or stats (the bird is undressed too).
     private func resetEverything() {
         lan.leave()
         progress.resetAll()
@@ -300,9 +607,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         Log.write("all progress reset")
         if isPaused {
             pauseMenu.willShow()
-            pauseMenu.setSettings(sound: !muted, preview: hud.showPreview, help: hud.showHelp, hudOpacity: hudOpacity,
-                                  cameras: CameraManager.availableDevices().map { ($0.uniqueID, $0.localizedName) },
-                                  current: camera.device?.uniqueID)
+            pauseMenu.setSettings(settingsValues)
         }
     }
 
@@ -325,12 +630,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
     private func makeGame(_ id: WorldID, mode: GameMode) -> Game {
         let mp = inMultiplayer
         let sp = progress.selected
-        let g = Game(controls: shared, world: id, mode: mode, multiplayer: mp, species: sp, points: progress.points(sp))
+        let g = Game(controls: shared, world: id, mode: mode, multiplayer: mp, species: sp, points: progress.points(sp), outfit: progress.outfit)
         g.sound = sound
+        progress.flewIn(id.rawValue)
         g.onRing = { [weak self] streak in
             guard let self else { return }
             let gained = self.progress.ringPassed(streak: streak)
             self.hud.showRingFlash(coins: gained, total: self.progress.coins, streak: g.world.isChallenge ? streak : 0)
+            self.checkGoals()
+        }
+        g.onFlight = { [weak self] meters, top in
+            self?.progress.addFlight(meters: meters, topKmh: top)
+            self?.checkGoals()
         }
         g.onHit = { [weak self] coins in
             guard let self else { return }
@@ -344,8 +655,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         g.onKnockout = { [weak self] victim in
             guard let self else { return }
             let c = self.progress.award(8, world: id.rawValue)
+            self.progress.knockedOutBird()
             self.hud.setCoins(self.progress.coins)
             self.hud.addFeed("+\(c) ●  knocked out \(victim)")
+            self.checkGoals()
         }
         g.onLocalEvent = { [weak self] e in self?.directorEvent(e) }
         if mp {
@@ -360,13 +673,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
             g.enqueue { $0.restartMatch() }
         }
         g.paused = isPaused
+        g.apply(GraphicsQuality.current)
         game = g
         mouth.enabled = g.combatOn
         // Compile the new world's shaders (and every attack's, when attacks are possible) in the background,
         // so the first fireball or explosion doesn't stutter.
-        let warm: [Any] = [g.scene] + (mode == .pvp || mp ? Combat.warmupNodes() : [])
-        scnView?.prepare(warm, completionHandler: nil)
-        if let v = scnView {
+        if let u = uncapped {
+            u.renderer.prepare(g.warmupObjects(), completionHandler: nil)
+            u.set(scene: g.scene, camera: g.cameraNode)
+        } else if let v = scnView {
+            v.prepare(g.warmupObjects(), completionHandler: nil)
             v.scene = g.scene
             v.pointOfView = g.cameraNode
         }
@@ -403,9 +719,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
     }
 
     private func applyBird(_ sp: Species) {
-        game?.setSpecies(sp, points: progress.points(sp))
+        game?.setSpecies(sp, points: progress.points(sp), outfit: progress.outfit)
         lan.bird = sp.id
+        lan.fit = progress.outfit.code
         lan.updateProfile()
+        checkGoals()
     }
 
     // MARK: Results & coins
@@ -423,32 +741,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
                 DispatchQueue.global(qos: .utility).async { Ghosts.save(run, out.mode, out.world) }
                 game?.setBest(time: t, run: run)
             }
-            // Medal bonus, doubled the first time you reach a new medal on this course.
+            // Finishing pays more the fewer rings you miss; medals pay extra (double the first time you reach a new medal
+            // on this course); beating your best adds a bonus. Harder worlds pay a little more.
             let firstMedal = medal != nil && (bestMedalBefore == nil || medal! > bestMedalBefore!)
-            let base = out.gates * 3 + 25 + (pb ? 15 : 0) + (medal?.coins ?? 0) * (firstMedal ? 2 : 1)
-            r.coins = progress.award(base, world: world)
+            let total = max(out.gates + out.missed, 1)
+            let finish = 40 + 40 * Float(out.gates) / Float(total)
+            let extra = Float((pb && before != nil ? 15 : 0) + (medal?.coins ?? 0) * (firstMedal ? 2 : 1))
+            r.coins = progress.award(Int(((finish + extra) * WorldCatalog.info(world).raceBonus).rounded()), world: world)
             r.personalBest = pb && before != nil
             r.title = medal.map { "\($0.name) medal!" } ?? "Finished!"
-            var rows = [Standing(id: 1, name: "You", color: -1, place: 0, time: t,
-                                 note: "")]
+            var rows = [Standing(id: 1, name: "You", color: -1, place: 0, time: t, note: "")]
             if let b = before, !pb { rows.append(Standing(id: 0, name: "Your best", color: 6, place: 0, time: b)) }
             for (m, target) in zip([Medal.gold, .silver, .bronze], out.medals) {
                 rows.append(Standing(id: 0, name: m.name, color: m.color, place: 0, time: target))
             }
-            r.standings = rows
+            // Fastest first, so you can see where your time landed between the medals.
+            r.standings = rows.sorted { ($0.time ?? .infinity) < ($1.time ?? .infinity) }
             if out.missed > 0 { r.footer = "\(out.missed) missed \(out.mode == .ringRace ? "ring" : "checkpoint")\(out.missed == 1 ? "" : "s") (+\(out.missed * 5) s)  ·  " }
             r.footer += "Press N to race again  ·  Esc for other modes"
         } else {
-            let placeBonus = [50, 20, 10]
+            // Placing, plus a coin per hit landed; harder bots pay more.
+            let placeBonus = [60, 30, 15]
             let base = out.hits + (out.place <= placeBonus.count ? placeBonus[out.place - 1] : 0)
-            progress.recordFight(won: out.place == 1, knockouts: out.knockouts)
-            r.coins = progress.award(base, world: world)
+            let hard = BotSettings.difficulty == 2
+            progress.recordFight(won: out.place == 1, knockouts: 0, hard: hard)
+            r.coins = progress.award(Int((Float(base) * [0.75, 1, 1.4][BotSettings.difficulty]).rounded()), world: world)
             r.title = out.place == 1 ? "You won!" : "\(ordinal(out.place)) place"
             r.standings = out.standings
             r.footer = "Press N to fight again  ·  Esc for other modes"
         }
         hud.setCoins(progress.coins)
         hud.showResults(r)
+        checkGoals()
     }
 
     private func multiplayerResult(_ standings: [Standing]) {
@@ -474,6 +798,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         r.footer = lan.role == .hosting ? "Press N to start the next round" : "The next round starts when the host is ready"
         hud.setCoins(progress.coins)
         hud.showResults(r)
+        checkGoals()
     }
 
     // MARK: LAN
@@ -485,6 +810,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         lan.color = d.object(forKey: "lan.color") as? Int ?? Int.random(in: 0..<NameColors.all.count)
         d.set(lan.color, forKey: "lan.color")
         lan.bird = progress.selected.id
+        lan.fit = progress.outfit.code
         Game.playerColor = lan.color
     }
 
@@ -523,6 +849,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         }
         lan.onEnded = { [weak self] why in
             guard let self, !self.terminating else { return }
+            self.countedLANGame = false
             self.knownPlayers = []
             self.knownNames = [:]
             self.chatView.close()
@@ -538,6 +865,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
 
     private var knownPlayers: Set<Int> = []
     private var knownNames: [Int: String] = [:]
+    private var countedLANGame = false
 
     /// The host changed the mode, map or settings (or someone joined / left).
     private func lobbyChanged(_ l: Lobby) {
@@ -552,6 +880,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         }
         knownPlayers = ids
         knownNames = Dictionary(l.players.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
+        // Counts toward "Flock together" (once per game joined or hosted).
+        if l.players.count >= 2 && !countedLANGame {
+            countedLANGame = true
+            progress.playedLAN()
+            checkGoals()
+        }
         let world = WorldID(rawValue: l.world) ?? .meadow
         if game?.multiplayer != true || world != currentWorld || l.mode != currentMode {
             let g = makeGame(world, mode: l.mode)
@@ -711,23 +1045,191 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         guard let game else { return }
         let s = game.stats
         hud.update(s, pose: shared.pose, cameraName: camera.device?.localizedName ?? "No camera")
+        tutorial.tick()
+        welcome?.tick()
         if lan.role == .hosting, let c = director.tick() { finishRound(c) }
         tickHiddenGame()
         chatView.bottomInset = hud.helpTop
         chatView.tick()
         hudTicks += 1
+        if hudTicks % 30 == 0 { watchFrameRate(s.fps) }
+        if hudTicks % 10 == 0 { updateUncapped() }
         if hudTicks % 90 == 0 {
             Log.write(String(format: "fps %.1f speed %.0f km/h alt %.0f rings %d tracking %d mode %@ players %d", s.fps, s.speedKmh, s.altitude,
                              s.score, s.control.tracking ? 1 : 0, s.mode.rawValue, s.players))
         }
     }
 
+    // MARK: Photos
+
+    /// P: the 3D view without the HUD, saved to Pictures › Bird Game.
+    func takePhoto() {
+        guard !isPaused else { return }
+        let image: NSImage
+        if uncapped != nil, let game, let device = scnView.device {
+            let r = SCNRenderer(device: device, options: nil)
+            r.scene = game.scene
+            r.pointOfView = game.cameraNode
+            image = r.snapshot(atTime: CACurrentMediaTime() + renderClockOffset, with: scnView.convertToBacking(scnView.bounds).size,
+                               antialiasingMode: .multisampling4X)
+        } else {
+            image = scnView.snapshot()
+        }
+        let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures/Bird Game", isDirectory: true)
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+        let url = dir.appendingPathComponent("Bird Game \(f.string(from: Date())).png")
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            var saved = false
+            if let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+               let png = rep.representation(using: .png, properties: [:]) {
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                saved = (try? png.write(to: url)) != nil
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if saved {
+                    self.sound?.click()
+                    self.hud.showToast("Photo saved", "Pictures \u{203A} Bird Game", color: Wii.blue)
+                } else {
+                    NSSound.beep()
+                    self.hud.showNotice("Couldn't save the photo")
+                }
+            }
+        }
+    }
+
+    // MARK: Settings
+
+    private var settingsValues: SettingsCard.Values {
+        SettingsCard.Values(sound: !muted, help: hud.showHelp, chat: Prefs.showChat, fps: Prefs.showFPS, autoUpdate: updater.autoCheck,
+                            hudOpacity: hudOpacity, cameras: CameraManager.availableDevices().map { ($0.uniqueID, $0.localizedName) },
+                            currentCamera: camera.device?.uniqueID, preview: hud.showPreview, graphics: GraphicsQuality.pinned,
+                            automaticGraphics: GraphicsQuality.automatic, vsync: Prefs.vsync,
+                            screenMaxFPS: window?.screen?.maximumFramesPerSecond ?? NSScreen.main?.maximumFramesPerSecond ?? 60)
+    }
+
+    // MARK: Graphics
+
+    private var slowSeconds = 0
+    private var watchingSince = CACurrentMediaTime()
+    private let graphicsMenu = NSMenu(title: "Graphics")
+
+    /// Automatic graphics: flying that stays choppy (under 40 fps for most of 10 seconds) steps the level down.
+    private func watchFrameRate(_ fps: Float) {
+        guard GraphicsQuality.pinned == nil, !isPaused, welcome == nil, NSApp.isActive,
+              window.occlusionState.contains(.visible), CACurrentMediaTime() - watchingSince > 8, fps > 0 else {
+            slowSeconds = 0
+            return
+        }
+        slowSeconds = fps < 40 ? slowSeconds + 1 : max(0, slowSeconds - 2)
+        guard slowSeconds >= 10, GraphicsQuality.automatic != .low,
+              let lower = GraphicsQuality(rawValue: GraphicsQuality.automatic.rawValue - 1) else { return }
+        slowSeconds = 0
+        GraphicsQuality.automatic = lower
+        applyGraphics()
+        Log.write(String(format: "graphics: %.0f fps, automatic level now %@", fps, lower.title))
+        hud.showToast("Graphics set to \(lower.title)", "To keep flying smooth (Game menu \u{2192} Graphics)", color: Wii.blue)
+    }
+
+    private func applyGraphics() {
+        let q = GraphicsQuality.current
+        scnView.antialiasingMode = q.antialiasing
+        uncapped?.set(samples: q.samples)
+        game?.apply(q)
+        watchingSince = CACurrentMediaTime()
+        rebuildGraphicsMenu()
+    }
+
+    private func rebuildGraphicsMenu() {
+        graphicsMenu.removeAllItems()
+        let auto = graphicsMenu.addItem(withTitle: "Automatic (\(GraphicsQuality.automatic.title))", action: #selector(selectGraphics(_:)), keyEquivalent: "")
+        auto.tag = -1
+        auto.target = self
+        auto.state = GraphicsQuality.pinned == nil ? .on : .off
+        graphicsMenu.addItem(.separator())
+        for q in GraphicsQuality.allCases.reversed() {
+            let item = graphicsMenu.addItem(withTitle: q.title, action: #selector(selectGraphics(_:)), keyEquivalent: "")
+            item.tag = q.rawValue
+            item.target = self
+            item.state = GraphicsQuality.pinned == q ? .on : .off
+        }
+    }
+
+    @objc private func selectGraphics(_ item: NSMenuItem) {
+        setGraphics(item.tag < 0 ? nil : GraphicsQuality(rawValue: item.tag))
+    }
+
+    /// nil = automatic (starting again from what this Mac can do).
+    private func setGraphics(_ q: GraphicsQuality?) {
+        if let q {
+            GraphicsQuality.pinned = q
+        } else {
+            GraphicsQuality.pinned = nil
+            GraphicsQuality.automatic = GraphicsQuality.hardwareDefault
+        }
+        applyGraphics()
+    }
+
+    /// V-Sync on: SceneKit's view draws, 60 fps in step with the screen. Off: the uncapped renderer draws instead,
+    /// as fast as the Mac can (SceneKit's view can't go past the screen's refresh rate).
+    private func applyVSync() {
+        guard let scnView else { return }
+        if Prefs.vsync {
+            scnView.preferredFramesPerSecond = 60
+            guard let u = uncapped else { return }
+            u.stop()
+            u.removeFromSuperview()
+            uncapped = nil
+            scnView.scene = game?.scene
+            scnView.pointOfView = game?.cameraNode
+            scnView.isPlaying = true
+            scnView.rendersContinuously = true
+            Log.write("v-sync on")
+        } else {
+            guard uncapped == nil, let device = scnView.device,
+                  let u = UncappedView(device: device, delegate: self, clock: { [weak self] in CACurrentMediaTime() + (self?.renderClockOffset ?? 0) })
+            else { return }
+            // SceneKit's view stops drawing (and lets go of the scene) while this one draws.
+            scnView.rendersContinuously = false
+            scnView.isPlaying = false
+            scnView.scene = nil
+            u.frame = scnView.frame
+            u.autoresizingMask = [.width, .height]
+            window.contentView!.addSubview(u, positioned: .above, relativeTo: scnView)
+            u.set(scene: game?.scene, camera: game?.cameraNode)
+            u.set(samples: GraphicsQuality.current.samples)
+            u.set(visible: true, paced: isPaused)
+            uncapped = u
+            u.start()
+            Log.write("v-sync off: uncapped renderer")
+        }
+    }
+
+    /// The uncapped renderer only draws while the window can be seen, and at 60 fps while the menu is open.
+    private func updateUncapped() {
+        guard let u = uncapped else { return }
+        u.set(visible: window.occlusionState.contains(.visible) && !window.isMiniaturized, paced: isPaused)
+    }
+
+    private func setAutoUpdate(_ on: Bool) {
+        updater.autoCheck = on
+        autoUpdateItem?.state = on ? .on : .off
+        if on { updater.checkIfDue() }
+    }
+
     // MARK: Actions
 
     func recalibrate() { camera.queue.async { self.interpreter.recalibrate() } }
-    func togglePreview() { hud.showPreview.toggle() }
+    func togglePreview() { hud.showPreview.toggle(); Prefs.showPreview = hud.showPreview }
     func toggleHelp() { hud.showHelp.toggle() }
-    func toggleMute() { muted.toggle(); sound?.setMuted(muted || isPaused) }
+    func toggleMute() { setMuted(!muted) }
+    func setMuted(_ m: Bool) {
+        muted = m
+        Prefs.muted = m
+        sound?.setMuted(muted || isPaused)
+        sound?.setUIMuted(muted)
+    }
     func attack() { game?.keys.attack = true }
 
     /// T: type a message to everyone in the LAN game.
@@ -755,6 +1257,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         main.addItem(appItem)
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Bird Game", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        let check = appMenu.addItem(withTitle: "Check for Updates\u{2026}", action: #selector(menuCheckForUpdates), keyEquivalent: "")
+        check.target = self
+        let auto = appMenu.addItem(withTitle: "Check for Updates Automatically", action: #selector(menuAutoUpdates(_:)), keyEquivalent: "")
+        auto.target = self
+        auto.state = updater.autoCheck ? .on : .off
+        autoUpdateItem = auto
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit Bird Game", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
@@ -769,6 +1277,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         gameMenu.addItem(withTitle: "Toggle Camera Preview", action: #selector(menuPreview), keyEquivalent: "")
         gameMenu.addItem(withTitle: "Toggle Help", action: #selector(menuHelp), keyEquivalent: "")
         gameMenu.addItem(withTitle: "Mute", action: #selector(menuMute), keyEquivalent: "")
+        let gfx = gameMenu.addItem(withTitle: "Graphics", action: nil, keyEquivalent: "")
+        gfx.submenu = graphicsMenu
+        rebuildGraphicsMenu()
         gameMenu.addItem(.separator())
         let fs = gameMenu.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
         fs.keyEquivalentModifierMask = [.command, .control]
@@ -804,10 +1315,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
               let d = CameraManager.availableDevices().first(where: { $0.uniqueID == id }) else { return }
         camera.start(with: d)
     }
+    @objc private func menuCheckForUpdates() {
+        if !isPaused { togglePause() }
+        updater.check()
+    }
+    @objc private func menuAutoUpdates(_ item: NSMenuItem) {
+        setAutoUpdate(!updater.autoCheck)
+    }
     @objc private func menuPause() { togglePause() }
     @objc private func menuRecalibrate() { recalibrate() }
     @objc private func menuRestart() { restart() }
     @objc private func menuPreview() { togglePreview() }
     @objc private func menuHelp() { toggleHelp() }
     @objc private func menuMute() { toggleMute() }
+}
+
+extension AppDelegate: TutorialHost {
+    var tutorialStats: HUDStats { game?.stats ?? HUDStats() }
+    var tutorialControl: ControlState { shared.control }
+    var tutorialPaused: Bool { isPaused }
+    func tutorialRecalibrate() { recalibrate() }
+    func tutorialRings(_ on: Bool) { game?.setTutorialRings(on) }
+    func tutorialTargets(_ on: Bool) {
+        game?.setPracticeTargets(on)
+        // (The practice flag changes on the render thread, so don't read combatOn back here.)
+        mouth.enabled = on || (game?.matchCombat ?? false)
+    }
+    func tutorialBigPreview(_ on: Bool) {
+        hud.previewScale = on ? 1.5 : 1
+        if on { hud.showPreview = true }
+    }
+    func tutorialStartMenuTour() {
+        pauseMenu.startTour { [weak self] in self?.tutorial.menuTourFinished() }
+    }
+    func tutorialSound(_ success: Bool) { if success { sound?.success() } }
+    func tutorialFinished(completed: Bool) {
+        game?.restoreRings()
+        game?.setPracticeTargets(false)
+        mouth.enabled = game?.matchCombat ?? false
+        hud.previewScale = 1
+        tutorial.overlay.isHidden = true
+        if completed {
+            progress.finishTutorial()
+            checkGoals()
+            Log.write("tutorial finished")
+        } else {
+            hud.showNotice("Tutorial closed")
+            hud.addFeed("Restart the tutorial any time: Esc \u{2192} Tutorial")
+        }
+    }
 }

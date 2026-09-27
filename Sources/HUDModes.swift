@@ -184,41 +184,88 @@ final class RaceBox: FlippedView {
 /// End-of-round results.
 final class ResultsView: FlippedView {
     var result: MatchResult? { didSet { needsDisplay = true } }
-    var height: CGFloat { CGFloat(130 + (result?.standings.count ?? 0) * 30 + ((result?.footer.isEmpty ?? true) ? 0 : 24)) }
+
+    // One table: a white title band, equal-height rows (place, colour dot, name, then note / time / KOs in fixed
+    // right-aligned columns), the coins, and a footer line.
+    private static let band: CGFloat = 64
+    private static let gap: CGFloat = 14
+    private static let rowH: CGFloat = 32
+    private static let side: CGFloat = 30
+
+    var height: CGFloat {
+        let rows = CGFloat(result?.standings.count ?? 0)
+        let footer: CGFloat = (result?.footer.isEmpty ?? true) ? 0 : 24
+        return 8 + ResultsView.band + ResultsView.gap + rows * ResultsView.rowH + 14 + 30 + footer + 22
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         guard let res = result else { return }
         let r = bounds.insetBy(dx: 4, dy: 4)
-        Wii.glossy(r, radius: 16, rim: Wii.blue, rimWidth: 2.5, maxGlass: 60)
-        Wii.drawText(res.title, in: NSRect(x: r.minX, y: r.minY + 16, width: r.width, height: 36), size: 28, bold: true, align: .center)
-        var y = r.minY + 62
-        // No placings (a solo race): no empty place column.
-        let indent: CGFloat = res.standings.contains { $0.place > 0 } ? 50 : 4
+        Wii.glossy(r, radius: 16, rim: Wii.blue, rimWidth: 2.5, maxGlass: ResultsView.band)
+        // The white band sits 4 pt inside the edge (the 2.5 pt rim and its 1.5 pt highlight).
+        let band = NSRect(x: r.minX + 4, y: r.minY + 4, width: r.width - 8, height: ResultsView.band)
+        Wii.drawText(res.title, in: band, size: 28, bold: true, align: .center, centerV: true)
+
+        let left = r.minX + ResultsView.side, right = r.maxX - ResultsView.side
+        let rowH = ResultsView.rowH
+        let hasPlace = res.standings.contains { $0.place > 0 }
+        let hasTime = res.standings.contains { $0.time != nil }
+        let hasKO = res.standings.contains { $0.knockouts > 0 }
+        let placeW: CGFloat = hasPlace ? 46 : 0
+        let koW: CGFloat = hasKO ? 58 : 0
+        let timeW: CGFloat = hasTime ? 80 : 0
+        let timeRight = right - koW
+        let noteRight = timeRight - (hasTime ? timeW + 12 : 0)
+        let noteW: CGFloat = 130
+        var y = band.maxY + ResultsView.gap
         for s in res.standings {
-            let row = NSRect(x: r.minX + 24, y: y, width: r.width - 48, height: 26)
-            if s.color == -1 || s.name == "You" {
+            let row = NSRect(x: left, y: y, width: right - left, height: rowH)
+            let you = s.color == -1 || s.name == "You"
+            if you {
                 Wii.blueLight.withAlphaComponent(0.6).setFill()
-                NSBezierPath(roundedRect: row.insetBy(dx: -8, dy: -1), xRadius: 8, yRadius: 8).fill()
+                NSBezierPath(roundedRect: row.insetBy(dx: -10, dy: 2), xRadius: 8, yRadius: 8).fill()
             }
             if s.place > 0 {
-                Wii.drawText(ordinal(s.place), in: NSRect(x: row.minX, y: row.minY + 3, width: 44, height: 20), size: 15, bold: true)
+                // The podium in medal colours (dark enough to read on the light card).
+                let podium = [NSColor(srgbRed: 0.78, green: 0.56, blue: 0.05, alpha: 1), NSColor(srgbRed: 0.46, green: 0.49, blue: 0.54, alpha: 1),
+                              NSColor(srgbRed: 0.66, green: 0.38, blue: 0.18, alpha: 1)]
+                Wii.drawText(ordinal(s.place), in: NSRect(x: left, y: row.minY, width: placeW, height: rowH), size: 15, bold: true,
+                             color: s.place <= 3 ? podium[s.place - 1] : Wii.text, centerV: true)
             }
-            let dot = NSRect(x: row.minX + indent, y: row.minY + 7, width: 12, height: 12)
-            (s.color >= 0 ? NameColors.ns(s.color) : (Medal.ns(s.color) ?? Wii.blue)).setFill(); NSBezierPath(ovalIn: dot).fill()
-            Wii.drawText(s.name, in: NSRect(x: row.minX + indent + 20, y: row.minY + 3, width: row.width * 0.45, height: 20), size: 15, truncate: true)
-            var right = s.note
-            if let t = s.time { right = (s.note.isEmpty ? "" : s.note + "   ") + raceClock(t) }
-            if s.knockouts > 0 { right += (right.isEmpty ? "" : "   ") + "\(s.knockouts) KO" }
-            Wii.drawText(right, in: NSRect(x: row.minX, y: row.minY + 3, width: row.width, height: 20), size: 15, color: Wii.textSoft,
-                         align: .right)
-            y += 30
+            let dotX = left + placeW
+            (s.color >= 0 ? NameColors.ns(s.color) : (Medal.ns(s.color) ?? Wii.blue)).setFill()
+            NSBezierPath(ovalIn: NSRect(x: dotX, y: row.midY - 6, width: 12, height: 12)).fill()
+            // Right-hand columns: KOs at the edge, the time left of them, a note left of the time (or in its place).
+            if s.knockouts > 0 {
+                Wii.drawText("\(s.knockouts) KO", in: NSRect(x: right - koW, y: row.minY, width: koW, height: rowH), size: 15,
+                             color: Wii.textSoft, align: .right, centerV: true)
+            }
+            var used = right - koW
+            if let t = s.time {
+                Wii.drawText(raceClock(t), in: NSRect(x: timeRight - timeW, y: row.minY, width: timeW, height: rowH), size: 15,
+                             bold: you, color: you ? Wii.text : Wii.textSoft, align: .right, centerV: true)
+                used = timeRight - timeW
+            }
+            if !s.note.isEmpty {
+                // A row without a time puts its note where the time would be ("did not finish"); in a table with no
+                // times at all (a fight) it goes in the rightmost column with the KOs ("out").
+                let noteEnd = s.time != nil ? noteRight : (hasTime ? timeRight : (s.knockouts > 0 ? right - koW : right))
+                Wii.drawText(s.note, in: NSRect(x: noteEnd - noteW, y: row.minY, width: noteW, height: rowH), size: 14,
+                             color: Wii.textSoft, align: .right, centerV: true)
+                used = min(used, noteEnd - Wii.attributed(s.note, font: Wii.font(14), color: Wii.textSoft, align: .left).size().width)
+            }
+            let nameX = dotX + 20
+            Wii.drawText(s.name, in: NSRect(x: nameX, y: row.minY, width: max(40, used - 12 - nameX), height: rowH), size: 15,
+                         bold: you, centerV: true, truncate: true)
+            y += rowH
         }
-        y += 8
+        y += 14
         var coinLine = res.coins > 0 ? "+\(res.coins) ●" : ""
-        if res.personalBest { coinLine += (coinLine.isEmpty ? "" : "    ") + "New personal best!" }
-        Wii.drawText(coinLine, in: NSRect(x: r.minX, y: y, width: r.width, height: 26), size: 20, bold: true, color: Wii.text, align: .center)
+        if res.personalBest { coinLine += (coinLine.isEmpty ? "" : "     ") + "New personal best!" }
+        Wii.drawText(coinLine, in: NSRect(x: r.minX, y: y, width: r.width, height: 30), size: 20, bold: true, align: .center, centerV: true)
         if !res.footer.isEmpty {
-            Wii.drawText(res.footer, in: NSRect(x: r.minX, y: y + 30, width: r.width, height: 18), size: 13, color: Wii.textSoft, align: .center)
+            Wii.drawText(res.footer, in: NSRect(x: r.minX + 16, y: y + 32, width: r.width - 32, height: 20), size: 13, color: Wii.textSoft,
+                         align: .center, centerV: true, truncate: true)
         }
     }
 }

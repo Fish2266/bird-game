@@ -11,6 +11,16 @@ enum BirdIcon {
         let s = min(r.width, r.height) / 32
         let c = NSPoint(x: r.midX, y: r.midY + 1 * s)
         func col(_ v: SIMD3<Float>) -> NSColor { (mono ?? swatchColor(v)).withAlphaComponent(alpha) }
+        // A soft shadow keeps white birds (the owl) visible on the white cards.
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        if mono == nil {
+            let sh = NSShadow()
+            sh.shadowColor = NSColor.black.withAlphaComponent(0.28 * alpha)
+            sh.shadowBlurRadius = max(1, s * 0.9)
+            sh.shadowOffset = NSSize(width: 0, height: -s * 0.3)
+            sh.set()
+        }
         let spanK = CGFloat(min(max(l.span, 0.85), 1.15)) * 0.9
         // Wings: a swept, curved blade on each side, darker toward the tip.
         for side: CGFloat in [-1, 1] {
@@ -40,12 +50,19 @@ enum BirdIcon {
         NSBezierPath(ovalIn: NSRect(x: c.x - 3.2 * s, y: c.y - 7 * s, width: 6.4 * s, height: 14 * s)).fill()
         col(l.back).withAlphaComponent(alpha * 0.8).setFill()
         NSBezierPath(ovalIn: NSRect(x: c.x - 1.6 * s, y: c.y - 4 * s, width: 3.2 * s, height: 8 * s)).fill()
+        let hs = CGFloat(l.headScale), hr = 2.8 * s * hs
+        let hc = NSPoint(x: c.x, y: c.y - 8.2 * s - (hs - 1) * 1.5 * s)
+        if let t = l.throat {
+            col(t).setFill()
+            NSBezierPath(ovalIn: NSRect(x: hc.x - hr * 0.75, y: hc.y - hr * 0.2, width: hr * 1.5, height: hr * 1.2)).fill()
+        }
         col(l.head).setFill()
-        NSBezierPath(ovalIn: NSRect(x: c.x - 2.8 * s, y: c.y - 11 * s, width: 5.6 * s, height: 5.6 * s)).fill()
+        NSBezierPath(ovalIn: NSRect(x: hc.x - hr, y: hc.y - hr, width: hr * 2, height: hr * 2)).fill()
+        let bw = 1 * s * CGFloat(max(l.beakWidth, 0.45)), blen = 3.5 * s * CGFloat(l.beakLength)
         let b = NSBezierPath()
-        b.move(to: NSPoint(x: c.x - 1 * s, y: c.y - 10.5 * s))
-        b.line(to: NSPoint(x: c.x, y: c.y - 14 * s))
-        b.line(to: NSPoint(x: c.x + 1 * s, y: c.y - 10.5 * s))
+        b.move(to: NSPoint(x: hc.x - bw, y: hc.y - hr * 0.8))
+        b.line(to: NSPoint(x: hc.x, y: hc.y - hr * 0.8 - blen))
+        b.line(to: NSPoint(x: hc.x + bw, y: hc.y - hr * 0.8))
         b.close()
         col(l.beak).setFill(); b.fill()
     }
@@ -297,10 +314,18 @@ final class WiiTabs: FlippedView {
     }
 }
 
-/// Turntable 3D preview of a species on a plain light backdrop.
-final class BirdPreviewView: SCNView {
+/// Turntable 3D preview of a species (and its outfit) on a plain light backdrop.
+final class BirdPreviewView: SCNView, SCNSceneRendererDelegate {
+    enum Framing { case full, portrait }
     private let pivot = SCNNode()
+    private let cam = SCNNode()
+    /// Swapped on the main thread, animated on the render thread: guarded by `lock`.
     private var bird: BirdNode?
+    private var framing = Framing.full
+    private let lock = NSLock()
+    private var lastTime: TimeInterval = 0
+    private var angle: Float = 0
+    private var shown: (String, Outfit, Framing)?
 
     override init(frame: NSRect, options: [String: Any]? = nil) {
         super.init(frame: frame, options: options)
@@ -327,30 +352,78 @@ final class BirdPreviewView: SCNView {
         scene.rootNode.addChildNode(sun)
 
         scene.rootNode.addChildNode(pivot)
-        pivot.runAction(.repeatForever(.rotateBy(x: 0, y: .pi * 2, z: 0, duration: 16)))
-
-        let cam = SCNNode()
         cam.camera = SCNCamera()
         cam.camera?.projectionDirection = .horizontal
-        cam.camera?.fieldOfView = 50
-        cam.simdPosition = SIMD3(0, 1.45, 3.7)
-        cam.simdLook(at: SIMD3(0, 0, 0), up: kUp, localFront: SIMD3(0, 0, -1))
+        cam.camera?.zNear = 0.05
+        cam.camera?.wantsHDR = true
+        cam.camera?.bloomIntensity = 0.4
+        cam.camera?.bloomThreshold = 1.2
         scene.rootNode.addChildNode(cam)
         pointOfView = cam
+        delegate = self
         rendersContinuously = true
+        placeCamera(.full)
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    func show(_ sp: Species) {
-        bird?.node.removeFromParentNode()
-        let b = BirdNode(look: sp.look)
+    /// Stopped previews stop drawing too (they sit in hidden tabs).
+    override var isPlaying: Bool { didSet { rendersContinuously = isPlaying } }
+
+    private func placeCamera(_ framing: Framing) {
+        switch framing {
+        case .full:
+            cam.camera?.fieldOfView = 50
+            cam.simdPosition = SIMD3(0, 1.45, 3.7)
+            cam.simdLook(at: SIMD3(0, 0, 0), up: kUp, localFront: SIMD3(0, 0, -1))
+        case .portrait:
+            cam.camera?.fieldOfView = 34
+            cam.simdPosition = SIMD3(0, 0.55, 2.1)
+            cam.simdLook(at: SIMD3(0, 0.12, 0), up: kUp, localFront: SIMD3(0, 0, -1))
+        }
+    }
+
+    /// `portrait` frames the head (hats, glasses, neckwear) and sways instead of spinning all the way round.
+    func show(_ sp: Species, outfit: Outfit = Outfit(), framing f: Framing = .full) {
+        if let s = shown, s.0 == sp.id, s.1 == outfit, s.2 == f { return }
+        shown = (sp.id, outfit, f)
+        placeCamera(f)
+        let b = BirdNode(look: sp.look, outfit: outfit, preview: true)
         b.pose(left: WingPose(elevation: 0.18, bend: -0.1), right: WingPose(elevation: 0.18, bend: -0.1),
                fold: 0, pitchIn: 0, rollIn: 0, dt: 1)
-        b.node.simdPosition = SIMD3(0, -0.1, 0)
-        let fit = 1 / max(sp.look.span * 0.9, sp.look.size)
-        b.node.simdScale = SIMD3(repeating: fit)
-        pivot.addChildNode(b.node)
+        switch f {
+        case .full:
+            let fit = 1 / max(sp.look.span * 0.9, sp.look.size)
+            b.node.simdScale = SIMD3(repeating: fit)
+            b.node.simdPosition = SIMD3(0, -0.1, 0)
+        case .portrait:
+            // Head (and its hat) at the centre of the turn, whatever the bird's size.
+            let k = 1.25 * sp.look.size
+            let fit = 1.1 / (k * sp.look.headScale)
+            b.node.simdScale = SIMD3(repeating: fit)
+            b.node.simdPosition = -sp.look.headCenter * k * fit
+        }
+        lock.lock()
+        let old = bird
         bird = b
+        framing = f
+        lock.unlock()
+        old?.node.removeFromParentNode()
+        pivot.addChildNode(b.node)
+    }
+
+    func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
+        lock.lock()
+        let bird = self.bird, framing = self.framing
+        lock.unlock()
+        let dt = lastTime > 0 ? Float(min(time - lastTime, 0.1)) : 0
+        lastTime = time
+        angle += dt
+        switch framing {
+        case .full: pivot.simdOrientation = simd_quatf(angle: angle * .pi * 2 / 16, axis: kUp)
+        // Facing you (the bird looks down -Z, so turn it round), swaying between three-quarter views.
+        case .portrait: pivot.simdOrientation = simd_quatf(angle: .pi + 0.62 * sin(angle * 0.5), axis: kUp)
+        }
+        bird?.tick(dt: dt, speed: 14, camera: cam.simdWorldPosition, emitting: true)
     }
 }
 
@@ -379,6 +452,24 @@ enum TabLayout {
     static var detailTop: CGFloat { cardH * 2 + gap }
 }
 
+/// The tabs on the right of the pause menu.
+enum MenuTab: Int, CaseIterable {
+    case play, birds, style, worlds, goals, lan
+    var title: String {
+        switch self {
+        case .play: return "Play"
+        case .birds: return "Birds"
+        case .style: return "Style"
+        case .worlds: return "Worlds"
+        case .goals: return "Goals"
+        case .lan: return "LAN"
+        }
+    }
+}
+
+/// Parts of the pause menu the tutorial points at.
+enum MenuPart { case tabs, tabArea, leftColumn, recalibrate, tutorial, settings, resume, coins }
+
 /// Esc screen: pause, settings and the bird shop.
 final class PauseMenuView: NSView {
     let progress: Progress
@@ -387,11 +478,8 @@ final class PauseMenuView: NSView {
     var onResume: (() -> Void)?
     var onRestart: (() -> Void)?
     var onRecalibrate: (() -> Void)?
-    var onSound: ((Bool) -> Void)?
-    var onPreview: ((Bool) -> Void)?
-    var onHelp: ((Bool) -> Void)?
-    var onHUDOpacity: ((CGFloat) -> Void)?
-    var onCamera: ((String) -> Void)?
+    /// Sound, camera, HUD, chat, graphics and update settings live on this card (the Settings button opens it).
+    let settings = SettingsCard()
     /// The flown species or its stats changed.
     var onBirdChanged: ((Species) -> Void)?
     /// The chosen world changed (bought or picked) — travel there.
@@ -404,37 +492,39 @@ final class PauseMenuView: NSView {
     var onRulesChanged: ((MatchRules) -> Void)? { didSet { lanPanel.onRulesChanged = onRulesChanged } }
     var onProfileChanged: ((String, Int) -> Void)? { didSet { lanPanel.onProfileChanged = onProfileChanged } }
     var onGoOnline: (() -> Void)? { didSet { lanPanel.onGoOnline = onGoOnline } }
+    /// Bought, wore or took off a cosmetic.
+    var onOutfitChanged: ((Outfit) -> Void)? { didSet { stylePanel.onOutfitChanged = onOutfitChanged } }
+    var onTutorial: (() -> Void)?
+    /// The update row's button.
+    var onUpdateAction: (() -> Void)? { didSet { updateRow.onAction = onUpdateAction } }
 
     private let panel = FlippedView()
     private let panelGloss = GlossBackground()
     private let title = WiiLabel(28, bold: true)
     private let coinLabel = WiiLabel(20, bold: true)
 
-    private let resume = WiiButton("Resume", textSize: 17)
-    private let restart = WiiButton("Restart")
-    private let recal = WiiButton("Recalibrate")
-    private let settingsHeader = WiiLabel(13, color: Wii.textSoft)
-    private let soundBox = WiiToggle("Sound")
-    private let previewBox = WiiToggle("Camera preview")
-    private let helpBox = WiiToggle("Help")
-    private let opacitySlider = WiiSlider("HUD opacity")
-    private let cameraSelector = WiiSelector("Camera")
-    private var cameras: [(id: String, name: String)] = []
-    private var cameraIndex = 0
+    // The left column's buttons are all the same size.
+    private let resume = WiiButton("Resume", textSize: 16)
+    private let restart = WiiButton("Restart", textSize: 16)
+    private let recal = WiiButton("Recalibrate", textSize: 16)
+    private let tutorialButton = WiiButton("Tutorial", textSize: 16)
+    private let settingsButton = WiiButton("Settings", textSize: 16)
     private let lifetime = WiiLabel(12, color: Wii.textSoft)
     private let version = WiiLabel(11, color: Wii.textSoft)
+    let updateRow = UpdateRowView()
 
     private let shopHeader = WiiLabel(20, bold: true)
     private let shopSub = WiiLabel(13, color: Wii.textSoft)
-    private let tabs = WiiTabs(["Play", "LAN", "Birds", "Worlds"])
+    private let tabs = WiiTabs(MenuTab.allCases.map(\.title))
     private let playPanel: PlayPanel
     private let lanPanel: LANPanel
+    let stylePanel: StylePanel
+    private let goalsPanel: GoalsPanel
     private var birdCards: [ShopCardView] = []
     private var worldCards: [ShopCardView] = []
-    /// 0 Play, 1 LAN, 2 Birds, 3 Worlds.
-    private var tab = 2
-    private var showingWorlds: Bool { tab == 3 }
-    private var showingShop: Bool { tab >= 2 }
+    private(set) var tab = MenuTab.birds
+    private var showingWorlds: Bool { tab == .worlds }
+    private var showingShop: Bool { tab == .birds || tab == .worlds }
     private let worldArt = WorldArtView()
     private var worldInfo: [WiiLabel] = []
     private var viewingWorld: WorldInfo
@@ -469,6 +559,8 @@ final class PauseMenuView: NSView {
         self.lan = lan
         playPanel = PlayPanel(progress: progress, lan: lan)
         lanPanel = LANPanel(lan: lan)
+        stylePanel = StylePanel(progress: progress)
+        goalsPanel = GoalsPanel(progress: progress)
         viewing = progress.selected
         viewingWorld = progress.world
         super.init(frame: .zero)
@@ -480,7 +572,6 @@ final class PauseMenuView: NSView {
 
         title.text = "Paused"
         coinLabel.align = .right
-        settingsHeader.text = "Settings"
         version.text = "Bird Game · \(AppVersion.display)"
         statLevel.align = .center
         statLevel.centerV = true
@@ -489,26 +580,26 @@ final class PauseMenuView: NSView {
         raiseButton.arrow = 1
         lowerButton.toolTip = "Turn one upgrade off (no refund — turn it back on any time)  ←"
         raiseButton.toolTip = "Turn a switched-off upgrade back on for free  →"
-        for v in [title, coinLabel, resume, restart, recal, settingsHeader, soundBox, previewBox, helpBox, opacitySlider,
-                  cameraSelector, lifetime, version, shopHeader, shopSub, tabs, preview, previewFrame, worldArt, detailTitle, detailBlurb,
+        for v in [title, coinLabel, resume, restart, recal, tutorialButton, settingsButton,
+                  lifetime, version, shopHeader, shopSub, tabs, preview, previewFrame, worldArt, detailTitle, detailBlurb,
                   attackLine, statSelect, statPanel, statTitle, statBlurb, statHint, statLevel, lowerButton, raiseButton, buyButton,
-                  action, playPanel, lanPanel] as [NSView] {
+                  action, playPanel, lanPanel, stylePanel, goalsPanel, updateRow] as [NSView] {
             panel.addSubview(v)
         }
 
         resume.onClick = { [weak self] in self?.onResume?() }
         restart.onClick = { [weak self] in self?.onRestart?() }
         recal.onClick = { [weak self] in self?.onRecalibrate?() }
-        soundBox.onChange = { [weak self] on in self?.onSound?(on) }
-        previewBox.onChange = { [weak self] on in self?.onPreview?(on) }
-        helpBox.onChange = { [weak self] on in self?.onHelp?(on) }
-        opacitySlider.onChange = { [weak self] v in self?.onHUDOpacity?(v) }
-        cameraSelector.onClick = { [weak self] in self?.nextCamera() }
+        tutorialButton.onClick = { [weak self] in self?.onTutorial?() }
+        tutorialButton.toolTip = "A quick walk-through: how to fly, the modes, the shop and the hidden tricks. Jump to any step."
+        settingsButton.onClick = { [weak self] in self?.showSettings() }
+        settingsButton.toolTip = "Sound, the camera, the HUD, chat, graphics and updates"
+        settings.onClose = { [weak self] in self?.hideSettings() }
         lowerButton.onClick = { [weak self] in self.map { $0.lower(BirdStat(rawValue: $0.selectedStat)!) } }
         raiseButton.onClick = { [weak self] in self.map { $0.raise(BirdStat(rawValue: $0.selectedStat)!) } }
         buyButton.onClick = { [weak self] in self.map { $0.upgrade(BirdStat(rawValue: $0.selectedStat)!) } }
 
-        tabs.onChange = { [weak self] i in self?.select(tab: i) }
+        tabs.onChange = { [weak self] i in self?.select(tab: MenuTab(rawValue: i) ?? .play) }
         for sp in Catalog.all {
             let c = ShopCardView(.bird(sp))
             c.onSelect = { [weak self] in self?.view(sp) }
@@ -542,6 +633,20 @@ final class PauseMenuView: NSView {
         statClick.onPick = { [weak self] i in self?.selectedStat = i; self?.refresh() }
         panel.addSubview(statClick)
         action.onClick = { [weak self] in self?.primaryAction() }
+        coach.isHidden = true
+        coach.wantsLayer = true
+        coach.layer?.zPosition = 100
+        coach.onNext = { [weak self] in self?.advanceTour() }
+        coach.onSkip = { [weak self] in
+            self?.endTour()
+            self?.tourFinished?()
+        }
+        settings.isHidden = true
+        settings.wantsLayer = true
+        settings.layer?.zPosition = 50
+        addSubview(settings)
+        addSubview(coach)
+        updateRow.show(.idle, current: AppVersion.short)
         refresh()
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -553,7 +658,7 @@ final class PauseMenuView: NSView {
         onKey?(e.charactersIgnoringModifiers ?? "")
         if e.keyCode == 53 { onResume?(); return }
         // Birds tab: ↑↓ pick a stat, ← turns an upgrade off, → turns it back on.
-        if tab == 2 {
+        if tab == .birds {
             let n = BirdStat.allCases.count
             switch e.keyCode {
             case 126: selectedStat = (selectedStat + n - 1) % n; refresh(); return
@@ -563,6 +668,8 @@ final class PauseMenuView: NSView {
             default: break
             }
         }
+        // The test codes' keys aren't used for anything else: no error beep for them.
+        if let c = e.charactersIgnoringModifiers, c.count == 1, "[];',.".contains(c) { return }
         super.keyDown(with: e)
     }
     override func cancelOperation(_ sender: Any?) { onResume?() }
@@ -570,34 +677,33 @@ final class PauseMenuView: NSView {
 
     // MARK: State
 
-    func setSettings(sound: Bool, preview: Bool, help: Bool, hudOpacity: CGFloat,
-                     cameras: [(id: String, name: String)], current: String?) {
-        opacitySlider.value = hudOpacity
-        soundBox.setOn(sound)
-        previewBox.setOn(preview)
-        helpBox.setOn(help)
-        self.cameras = cameras
-        cameraIndex = cameras.firstIndex { $0.id == current } ?? 0
-        cameraSelector.value = cameras.isEmpty ? "No camera" : cameras[cameraIndex].name
+    /// Fill in the settings card (called each time the menu opens).
+    func setSettings(_ v: SettingsCard.Values) { settings.show(v) }
+
+    func showSettings() {
+        settings.isHidden = false
+        needsLayout = true
+        window?.makeFirstResponder(settings)
     }
 
-    private func nextCamera() {
-        guard cameras.count > 1 else { NSSound.beep(); return }
-        cameraIndex = (cameraIndex + 1) % cameras.count
-        cameraSelector.value = cameras[cameraIndex].name
-        onCamera?(cameras[cameraIndex].id)
+    func hideSettings() {
+        guard !settings.isHidden else { return }
+        settings.isHidden = true
+        window?.makeFirstResponder(self)
     }
 
     func willShow() {
         viewing = progress.selected
         viewingWorld = progress.world
-        preview.isPlaying = true
+        preview.isPlaying = tab == .birds
+        if tab == .style { stylePanel.willShow() }
+        if tab == .goals { goalsPanel.refresh() }
         refresh()
         let fade = CABasicAnimation(keyPath: "opacity")
         fade.fromValue = 0; fade.toValue = 1; fade.duration = 0.15
         layer?.add(fade, forKey: "fade")
     }
-    func didHide() { preview.isPlaying = false; window?.makeFirstResponder(nil) }
+    func didHide() { settings.isHidden = true; preview.isPlaying = false; stylePanel.didHide(); window?.makeFirstResponder(nil) }
 
     /// Which mode and map are being played (for the Play tab).
     func setPlaying(mode: GameMode, world: WorldID) {
@@ -614,40 +720,132 @@ final class PauseMenuView: NSView {
 
     func chatChanged() { lanPanel.chatChanged() }
 
-    private func select(tab i: Int) {
-        tab = i
-        if i == 1 { lanPanel.refresh() }
-        if i == 0 { playPanel.refresh() }
+    func select(tab t: MenuTab) {
+        tab = t
+        if t == .lan { lanPanel.refresh() }
+        if t == .play { playPanel.refresh() }
+        preview.isPlaying = t == .birds
+        if t == .style { stylePanel.willShow() } else { stylePanel.didHide() }
+        if t == .goals { goalsPanel.refresh() }
         window?.makeFirstResponder(self)
         refresh()
     }
 
+    // MARK: Menu tour (tutorial)
+
+    private let coach = CoachMarkView()
+    private var tourIndex = -1
+    private var tourFinished: (() -> Void)?
+    var touring: Bool { tourIndex >= 0 }
+
+    /// Walk through the tabs with highlights; `done` runs at the end (or when skipped).
+    func startTour(done: @escaping () -> Void) {
+        tourFinished = done
+        tourIndex = 0
+        coach.isHidden = false
+        showTourStop()
+    }
+
+    func endTour() {
+        coach.isHidden = true
+        tourIndex = -1
+    }
+
+    private func showTourStop() {
+        let stops = MenuTour.stops
+        guard stops.indices.contains(tourIndex) else { return }
+        let stop = stops[tourIndex]
+        if let t = stop.tab { select(tab: t) }
+        layoutSubtreeIfNeeded()
+        coach.frame = bounds
+        coach.hole = frameOf(stop.part)
+        coach.show(stop, index: tourIndex, count: stops.count)
+        Sounds.shared?.click()
+    }
+
+    /// Test hook: jump the tour forward.
+    func debugAdvanceTour(_ n: Int) { for _ in 0..<n { advanceTour() } }
+
+    private func advanceTour() {
+        tourIndex += 1
+        if tourIndex >= MenuTour.stops.count {
+            endTour()
+            tourFinished?()
+        } else {
+            showTourStop()
+        }
+    }
+
     /// Test hook: open the Worlds tab on a given world.
     func debugShowWorld(_ id: String) {
-        tab = 3
+        tab = .worlds
         viewingWorld = WorldCatalog.info(id)
         refresh()
     }
 
-    /// Test hook: open a tab by index (0 Play, 1 LAN, 2 Birds, 3 Worlds).
-    func debugShowTab(_ i: Int) { select(tab: i) }
+    /// Test hook: open a tab.
+    func debugShowTab(_ t: MenuTab) { select(tab: t) }
+    /// Test hook: the Birds tab showing one bird.
+    func debugShowBird(_ sp: Species) { select(tab: .birds); view(sp) }
+
+    /// Where a part of the menu is, in this view's coordinates (for the tutorial's highlights).
+    func frameOf(_ part: MenuPart) -> NSRect {
+        let v: NSView
+        switch part {
+        case .tabs: v = tabs
+        case .tabArea: v = shopSub
+        case .leftColumn: v = resume
+        case .recalibrate: v = recal
+        case .tutorial: v = tutorialButton
+        case .settings: v = settingsButton
+        case .resume: v = resume
+        case .coins: v = coinLabel
+        }
+        var r = convert(v.bounds, from: v)
+        switch part {
+        case .tabArea:
+            // The whole tab: header, tab bar and everything under them.
+            let tabsRect = convert(tabs.bounds, from: tabs)
+            let body = convert(playPanel.bounds, from: playPanel)
+            let head = convert(shopHeader.bounds, from: shopHeader)
+            r = r.union(tabsRect).union(body).union(head).insetBy(dx: -10, dy: -8)
+        case .leftColumn:
+            let last = convert(settingsButton.bounds, from: settingsButton)
+            r = r.union(last).insetBy(dx: -8, dy: -8)
+        case .recalibrate:
+            r = r.union(convert(tutorialButton.bounds, from: tutorialButton)).insetBy(dx: -6, dy: -6)
+        default:
+            r = r.insetBy(dx: -6, dy: -6)
+        }
+        return r
+    }
 
     func refresh() {
         coinLabel.text = "● \(progress.coins)"
         lifetime.text = "Rings flown: \(progress.totalRings)   Races: \(progress.racesFinished)\nWins: \(progress.wins)   Knock-outs: \(progress.knockouts)"
         let flying = progress.selected
-        tabs.selected = tab
-        playPanel.isHidden = tab != 0
-        lanPanel.isHidden = tab != 1
+        tabs.selected = tab.rawValue
+        playPanel.isHidden = tab != .play
+        lanPanel.isHidden = tab != .lan
+        stylePanel.isHidden = tab != .style
+        goalsPanel.isHidden = tab != .goals
         switch tab {
-        case 0: shopHeader.text = "Play"; shopSub.text = "Pick a mode, then a map. Every mode pays out coins."
-        case 1: shopHeader.text = "LAN"; shopSub.text = "Play with friends on the same network. Host a game, or join or get invited to one."
-        case 2: shopHeader.text = "Birds"; shopSub.text = "Better birds cost more. Upgrade the birds you own with coins from flying, racing and fighting."
-        default: shopHeader.text = "Worlds"; shopSub.text = "Unlock new worlds to fly, race and fight in."
+        case .play: shopHeader.text = "Play"; shopSub.text = "Pick a mode, then a map. Every mode pays out coins."
+        case .lan: shopHeader.text = "LAN"; shopSub.text = "Play with friends on the same network. Host a game, or join or get invited to one."
+        case .birds: shopHeader.text = "Birds"; shopSub.text = "Better birds cost more. Upgrade the birds you own with coins from flying, racing and fighting."
+        case .style:
+            shopHeader.text = "Style"
+            shopSub.text = "Hats, glasses, neckwear, trails and paint jobs. Click one to try it on. Everyone in a LAN game sees it."
+            stylePanel.refresh()
+        case .worlds: shopHeader.text = "Worlds"; shopSub.text = "Unlock new worlds to fly, race and fight in."
+        case .goals:
+            shopHeader.text = "Goals"
+            shopSub.text = "\(progress.goalsDoneCount) of \(GoalCatalog.all.count) done. Goals pay bonus coins and unlock cosmetics you can't buy."
+            goalsPanel.refresh()
         }
         for c in birdCards {
             guard case .bird(let b) = c.item else { continue }
-            c.isHidden = tab != 2
+            c.isHidden = tab != .birds
             c.isHighlighted = b.id == viewing.id
             c.isEquipped = b.id == flying.id
             c.owned = progress.owns(b)
@@ -656,13 +854,13 @@ final class PauseMenuView: NSView {
         let here = progress.world
         for c in worldCards {
             guard case .world(let w) = c.item else { continue }
-            c.isHidden = tab != 3
+            c.isHidden = tab != .worlds
             c.isHighlighted = w.id == viewingWorld.id
             c.isEquipped = w.id == here.id
             c.owned = progress.ownsWorld(w)
             c.affordable = progress.coins >= w.cost
         }
-        let birds = tab == 2
+        let birds = tab == .birds
         for v in [preview, previewFrame, attackLine, statSelect, statClick, statPanel, statTitle, statBlurb, statHint, statLevel,
                   lowerButton, raiseButton, buyButton] as [NSView] { v.isHidden = !birds }
         for i in 0..<statBars.count { for v in [statNames[i], statBars[i], statValues[i]] as [NSView] { v.isHidden = !birds } }
@@ -738,7 +936,7 @@ final class PauseMenuView: NSView {
         detailBlurb.text = w.blurb
         let st = progress.stats(w)
         let rows: [String] = w.isChallenge || w.comingSoon ? [
-            "Ring value:  ×\(Int(w.ringMultiplier)), plus a streak bonus",
+            "Ring value:  \(w.multiplierText), up to double with a streak",
             "Ring boost:  +\(Int(w.ringBoost * 3.6)) km/h",
             "Hazards:  \(w.hazards)",
             "Best streak:  \(st.bestStreak)",
@@ -808,6 +1006,9 @@ final class PauseMenuView: NSView {
 
     override func layout() {
         super.layout()
+        settings.frame = bounds
+        coach.frame = bounds
+        if touring, MenuTour.stops.indices.contains(tourIndex) { coach.hole = frameOf(MenuTour.stops[tourIndex].part) }
         let W = min(1120, bounds.width - 40), H = min(740, bounds.height - 40)
         panel.frame = NSRect(x: (bounds.width - W) / 2, y: (bounds.height - H) / 2, width: W, height: H)
         panelGloss.frame = panel.frame.insetBy(dx: -GlossBackground.margin, dy: -GlossBackground.margin)
@@ -820,24 +1021,28 @@ final class PauseMenuView: NSView {
         // Left column
         let sx = pad, sw: CGFloat = 230
         var y = sep + 20
-        resume.frame = NSRect(x: sx - 5, y: y, width: sw + 10, height: 56); y += 60
-        restart.frame = NSRect(x: sx - 5, y: y, width: sw + 10, height: 48); y += 50
-        recal.frame = NSRect(x: sx - 5, y: y, width: sw + 10, height: 48); y += 66
-        settingsHeader.frame = NSRect(x: sx, y: y, width: sw, height: 18); y += 26
-        for b in [soundBox, previewBox, helpBox] { b.frame = NSRect(x: sx, y: y, width: sw, height: 32); y += 38 }
-        opacitySlider.frame = NSRect(x: sx - 12, y: y + 2, width: sw + 24, height: 48); y += 56
-        cameraSelector.frame = NSRect(x: sx, y: y, width: sw, height: 58); y += 70
+        for b in [resume, restart, recal, tutorialButton, settingsButton] {
+            b.frame = NSRect(x: sx - 5, y: y, width: sw + 10, height: 52); y += 58
+        }
+        y += 10
         lifetime.frame = NSRect(x: sx, y: y, width: sw, height: 44)
         version.frame = NSRect(x: sx, y: H - 30, width: sw, height: 16)
+        // The update row replaces the version line (it names the version itself).
+        version.isHidden = true
+        updateRow.frame = NSRect(x: sx, y: H - 80, width: sw, height: 66)
+        lifetime.isHidden = updateRow.frame.minY < lifetime.frame.maxY + 4
 
         // Tab area
         let x0 = sx + sw + 40, areaW = W - pad - x0
         shopHeader.frame = NSRect(x: x0, y: sep + 14, width: 200, height: 26)
-        tabs.frame = NSRect(x: x0 + areaW - 420, y: sep + 6, width: 420, height: 42)
+        let tabsW = min(areaW - 110, 600)
+        tabs.frame = NSRect(x: x0 + areaW - tabsW, y: sep + 6, width: tabsW, height: 42)
         shopSub.frame = NSRect(x: x0, y: sep + 50, width: areaW, height: 20)
         let gridTop = sep + 80
         playPanel.frame = NSRect(x: x0, y: gridTop, width: areaW, height: H - 30 - gridTop)
         lanPanel.frame = NSRect(x: x0, y: sep + 80, width: areaW, height: H - 30 - (sep + 80))
+        stylePanel.frame = NSRect(x: x0, y: gridTop, width: areaW, height: H - 30 - gridTop)
+        goalsPanel.frame = NSRect(x: x0, y: gridTop, width: areaW, height: H - 30 - gridTop)
         for cards in [birdCards, worldCards] {
             for (i, card) in cards.enumerated() {
                 card.frame = TabLayout.cardFrame(i, areaW: areaW, top: 0).offsetBy(dx: x0, dy: gridTop)

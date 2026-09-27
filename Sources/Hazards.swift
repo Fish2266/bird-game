@@ -84,9 +84,13 @@ final class LavaVent {
         spout.birthLocation = .volume
         spout.emittingDirection = SCNVector3(0, 1, 0)
         spout.spreadingAngle = 7
-        spout.particleVelocity = 62
-        spout.particleVelocityVariation = 14
-        spout.particleLifeSpan = 1.5
+        // Tops out around 75 m: about as high as the geyser can hurt you.
+        spout.particleVelocity = 72
+        spout.particleVelocityVariation = 10
+        // Long enough to reach the top of the arc and start falling back, fading as the drops cool (they used to
+        // vanish mid-climb as a dark blob).
+        spout.particleLifeSpan = 2.3
+        spout.particleLifeSpanVariation = 0.3
         spout.particleSize = 2.2
         spout.particleSizeVariation = 1
         spout.acceleration = SCNVector3(0, -34, 0)
@@ -97,7 +101,15 @@ final class LavaVent {
         col.values = [NSColor(srgbRed: 1, green: 0.85, blue: 0.4, alpha: 1), NSColor(srgbRed: 1, green: 0.4, blue: 0.08, alpha: 1),
                       NSColor(srgbRed: 0.35, green: 0.08, blue: 0.04, alpha: 0.9)]
         col.keyTimes = [0, 0.4, 1]
-        spout.propertyControllers = [.color: SCNParticlePropertyController(animation: col)]
+        let cool = CAKeyframeAnimation()
+        cool.values = [1, 1, 0.55, 0]
+        cool.keyTimes = [0, 0.55, 0.8, 1]
+        let shrink = CAKeyframeAnimation()
+        shrink.values = [1, 1, 0.6]
+        shrink.keyTimes = [0, 0.6, 1]
+        spout.propertyControllers = [.color: SCNParticlePropertyController(animation: col),
+                                     .opacity: SCNParticlePropertyController(animation: cool),
+                                     .size: SCNParticlePropertyController(animation: shrink)]
         let spoutNode = SCNNode()
         spoutNode.position = SCNVector3(0, 2.6, 0)
         spoutNode.addParticleSystem(spout)

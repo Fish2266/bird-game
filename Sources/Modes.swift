@@ -95,6 +95,8 @@ struct NetState: Codable {
     var lives = Fighter.startLives
     /// The sender's clock (seconds) when this state was taken, so others can replay it at an even pace.
     var t: Double = 0
+    /// Outfit code (so a change of hat shows up straight away).
+    var fit = ""
 
     static let alive = 1, paused = 2, finished = 4, spectator = 8, burning = 16
 }
@@ -175,8 +177,8 @@ enum MatchCommand: Codable {
 enum Medal: Int, Comparable {
     case bronze = 1, silver, gold
     var name: String { ["", "Bronze", "Silver", "Gold"][rawValue] }
-    /// Coin bonus for finishing with this medal.
-    var coins: Int { [0, 8, 18, 30][rawValue] }
+    /// Coin bonus for finishing with this medal (doubled the first time you win it on a course).
+    var coins: Int { [0, 15, 30, 50][rawValue] }
     /// Row color in the results (negative = medal colors).
     var color: Int { -1 - rawValue }
     static func < (a: Medal, b: Medal) -> Bool { a.rawValue < b.rawValue }

@@ -74,6 +74,8 @@ struct HUDStats {
     var fightersLeft = 0
     var fighters = 0
     var respawnIn: Float = 0
+    /// Tutorial balloons popped.
+    var practiceHits = 0
     // Other birds
     var showCompass = false
     var markers: [CompassMarker] = []
@@ -115,7 +117,7 @@ final class Game {
     let flock: Flock
     /// Hazards and special rules for challenge worlds (nil in World 1).
     let runtime: WorldRuntime?
-    private let sun = SCNNode()
+    let sun = SCNNode()
     private let moteEmitter = SCNNode()
     private let motes: SCNParticleSystem
 
@@ -144,8 +146,14 @@ final class Game {
     var onLocalEvent: ((GameEvent) -> Void)?
     /// Main queue: this player knocked someone out (for coins).
     var onKnockout: ((String) -> Void)?
+    /// Main queue, every few seconds: meters flown and the top speed (km/h) since the last report, counted only
+    /// while the player is flying the bird (not the idle autopilot).
+    var onFlight: ((Double, Double) -> Void)?
+    private var flightMeters: Double = 0
+    private var flightTop: Double = 0
+    private var flightReport: Float = 0
     private(set) var streak = 0
-    private var pendingSpecies: (Species, [Int])?
+    private var pendingSpecies: (Species, [Int], Outfit)?
     private var orbit: Float = 0
 
     private var lastTime: Double = -1
@@ -175,6 +183,8 @@ final class Game {
 
     var localId = 1
     var species = Catalog.all[0]
+    /// What the local bird is wearing.
+    private(set) var outfit = Outfit()
     var combatTuning = CombatTuning()
     /// Wing pose sent to other players.
     var wingState = SIMD4<Float>(0.1, 0.1, 0, 0)
@@ -197,6 +207,9 @@ final class Game {
     var pathHint = 0
     var progressS: Float = 0
     var offCourseFor: Float = 0
+    /// Race: time without getting further along the course, and the furthest point then (wedged on a roof, lost).
+    var stuckFor: Float = 0
+    var stuckBest: Float = 0
     var lastSafeS: Float = 0
     var finishTime: Double?
     var splitText: String?
@@ -243,14 +256,21 @@ final class Game {
     var stateTimer: Float = 0
     var matchWarning: String?
 
-    var combatOn: Bool { mode == .pvp || (multiplayer && rules.pvp) }
+    var combatOn: Bool { matchCombat || practiceCombat }
+    /// Attacks are part of this mode (not just the tutorial's practice balloons).
+    var matchCombat: Bool { mode == .pvp || (multiplayer && rules.pvp) }
+    /// Tutorial: attacks work (on the practice targets) outside a fight.
+    var practiceCombat = false
+    var practice: PracticeTargets?
+    /// Tutorial: free-roam rings can be switched off until they're introduced.
+    var ringsEnabled = true
     /// Test hook: overrides the player's input (used by the offscreen tests to fly courses).
     var debugSteer: ((Game) -> FlightInput?)?
     /// Test hook: combat events (hits taken, rams) as text.
     var debugEvent: ((String) -> Void)?
 
     init(controls: SharedControls, world id: WorldID = .meadow, mode: GameMode = .freeRoam, multiplayer: Bool = false,
-         species sp: Species? = nil, points: [Int]? = nil, terrainRadius: Int? = nil) {
+         species sp: Species? = nil, points: [Int]? = nil, outfit: Outfit = Outfit(), terrainRadius: Int? = nil) {
         self.controls = controls
         if let sp { species = sp }
         self.mode = mode
@@ -285,7 +305,7 @@ final class Game {
         let yaw = spawn.1
         orbs = a.map { HealthOrbs(arena: $0, spawnYaw: yaw, caves: id == .caves) }
         buildScene()
-        if let sp, let points { setSpecies(sp, points: points); applyPendingSpecies() }
+        if let sp, let points { setSpecies(sp, points: points, outfit: outfit); applyPendingSpecies() }
         if mode == .freeRoam {
             respawn()
         } else {
@@ -342,6 +362,7 @@ final class Game {
         scene.rootNode.addChildNode(combat.root)
         scene.rootNode.addChildNode(othersRoot)
         scene.rootNode.addChildNode(bird.node)
+        scene.rootNode.addChildNode(bird.fxRoot)
         scene.rootNode.addChildNode(flock.root)
 
         moteEmitter.addParticleSystem(motes)
@@ -402,6 +423,7 @@ final class Game {
     /// Teleport the local bird and snap the camera behind it.
     func place(at p: SIMD3<Float>, yaw: Float, speed: Float? = nil) {
         flight.reset(at: p, yaw: yaw)
+        bird.resetTrail()
         if let speed { flight.speed = speed }
         autopilotAlt = p.y
         camOffset = SIMD3(0, 1.5, 5)
@@ -538,7 +560,8 @@ final class Game {
         }
         if impact > 2 { sound?.impact(impact, water: hitWater); shake = min(1, shake + impact / 15) }
 
-        if mode == .freeRoam, let skipped = rings.update(prev: prevPos, now: flight.pos, time: elapsed) {
+        practice?.update(dt: frameDt, flight: flight)
+        if mode == .freeRoam, ringsEnabled, let skipped = rings.update(prev: prevPos, now: flight.pos, time: elapsed) {
             flight.speed += world.ringBoost
             sound?.chime()
             if world.isChallenge { streak = skipped > 0 ? 1 : streak + 1 }
@@ -574,6 +597,19 @@ final class Game {
         bird.node.simdPosition = flight.pos
         bird.node.simdOrientation = flight.orientation
         bird.pose(left: wingL, right: wingR, fold: fold, pitchIn: input.pitch, rollIn: input.roll, dt: frameDt)
+        bird.tick(dt: frameDt, speed: frozen ? 0 : flight.speed, camera: cameraNode.simdPosition, emitting: !frozen && !bird.node.isHidden)
+
+        // Distance and top speed (goals), only while someone is actually flying.
+        if !frozen && !autopilot && (tracking || keyboard) && debugSteer == nil {
+            flightMeters += Double(simd_distance(prevPos, flight.pos))
+            flightTop = max(flightTop, Double(flight.speed * 3.6))
+        }
+        flightReport += frameDt
+        if flightReport > 4, flightMeters > 0 || flightTop > 0, let cb = onFlight {
+            let (m, top) = (flightMeters, flightTop)
+            flightMeters = 0; flightTop = 0; flightReport = 0
+            DispatchQueue.main.async { cb(m, top) }
+        }
 
         // Wingbeat sound follows how fast the (displayed) wings actually move.
         let we = bird.wingElevations
@@ -612,7 +648,8 @@ final class Game {
         s.altitude = flight.pos.y
         s.agl = flight.pos.y - ground
         s.score = rings.score
-        if mode == .freeRoam, let r = rings.next {
+        s.practiceHits = practice?.hits ?? 0
+        if mode == .freeRoam, ringsEnabled, let r = rings.next {
             (s.ringDistance, s.ringBearing, s.ringAbove) = pointer(to: r.center)
         }
         s.control = c
@@ -644,22 +681,25 @@ final class Game {
         flight.roll += (0 - flight.roll) * approach(4, dt)
     }
 
-    /// Swap the player's bird model and stats (called from the UI thread; applied on the render thread).
-    func setSpecies(_ sp: Species, points: [Int]) {
-        statsLock.lock(); pendingSpecies = (sp, points); statsLock.unlock()
+    /// Swap the player's bird model, stats and outfit (called from the UI thread; applied on the render thread).
+    func setSpecies(_ sp: Species, points: [Int], outfit o: Outfit? = nil) {
+        statsLock.lock(); pendingSpecies = (sp, points, o ?? pendingSpecies?.2 ?? outfit); statsLock.unlock()
     }
 
     private func applyPendingSpecies() {
         statsLock.lock(); let p = pendingSpecies; pendingSpecies = nil; statsLock.unlock()
-        guard let (sp, points) = p else { return }
+        guard let (sp, points, o) = p else { return }
         flight.tuning = FlightTuning(points: points)
         combatTuning = CombatTuning(points: points)
         species = sp
-        let fresh = BirdNode(look: sp.look)
+        outfit = o
+        let fresh = BirdNode(look: sp.look, outfit: o)
         fresh.node.simdPosition = bird.node.simdPosition
         fresh.node.simdOrientation = bird.node.simdOrientation
         bird.node.removeFromParentNode()
+        bird.fxRoot.removeFromParentNode()
         scene.rootNode.addChildNode(fresh.node)
+        scene.rootNode.addChildNode(fresh.fxRoot)
         bird = fresh
     }
 
@@ -669,6 +709,8 @@ final class Game {
         // Show the bird with its wings spread while the menu is open.
         bird.pose(left: WingPose(elevation: 0.12, bend: 0), right: WingPose(elevation: 0.12, bend: 0),
                   fold: 0, pitchIn: 0, rollIn: 0, dt: dt)
+        // The trail freezes where it is; scarves and propellers keep moving gently.
+        bird.tick(dt: dt, speed: 8, camera: camPos, emitting: false)
         let q = simd_quatf(angle: flight.yaw + .pi * 0.75 + orbit, axis: kUp)
         let target = q.act(SIMD3(0, 1.2, 5.5))
         camOffset += (target - camOffset) * approach(2.5, dt)
@@ -688,10 +730,12 @@ final class Game {
         flat = simd_normalize(flat)
         let back = simd_normalize(simd_mix(flat, fwd, SIMD3(repeating: 0.4)))
         let speedT = smoothstep(10, 80, speed)
-        let dist: Float = (4.3 + speedT * 1.6) * (spectating != nil ? 1.6 : 1)
+        // Tiny birds (the hummingbird) get the camera a little closer so they don't turn into a speck.
+        let zoom = spectating != nil ? 1 : min(1, max(0.85, 0.4 + 0.75 * species.look.size))
+        let dist: Float = (4.3 + speedT * 1.6) * (spectating != nil ? 1.6 : 1) * zoom
         // Smooth the camera *offset* from the bird (not its world position) so it never
         // falls behind at high speed, but still swings smoothly through turns.
-        let desiredOffset = -back * dist + SIMD3(0, 1.45, 0)
+        let desiredOffset = -back * dist + SIMD3(0, 1.45 * zoom, 0)
         camOffset += (desiredOffset - camOffset) * approach(5.5, dt)
         camPos = pos + camOffset
         let camGround = max(TerrainShape.height(camPos.x, camPos.z), TerrainShape.waterLevel)

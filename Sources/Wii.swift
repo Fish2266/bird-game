@@ -175,7 +175,7 @@ class FlippedView: NSView { override var isFlipped: Bool { true } }
 final class WiiLabel: FlippedView {
     var text = "" { didSet { if text != oldValue { needsDisplay = true } } }
     var size: CGFloat = 15 { didSet { needsDisplay = true } }
-    var bold = false
+    var bold = false { didSet { needsDisplay = true } }
     var color: NSColor = Wii.text { didSet { needsDisplay = true } }
     var align: NSTextAlignment = .left { didSet { needsDisplay = true } }
     var centerV = false
@@ -201,10 +201,15 @@ final class WiiPanel: FlippedView {
     var borderColor = Wii.border { didSet { needsDisplay = true } }
     var radius: CGFloat = 12
     var inset: CGFloat = 4
+    /// Height of the white glassy band along the top (cards put their title in it, like the pause menu's "Paused").
+    var glass: CGFloat = 30 { didSet { needsDisplay = true } }
 
     var contentRect: NSRect { bounds.insetBy(dx: inset, dy: inset) }
+    /// The white band at the top, in this view's coordinates (exactly where `Wii.glossy` draws it: inside the 2 pt rim
+    /// and its 1.5 pt highlight).
+    var headerRect: NSRect { let c = contentRect; return NSRect(x: c.minX + 3.5, y: c.minY + 3.5, width: c.width - 7, height: glass) }
     override func draw(_ dirtyRect: NSRect) {
-        Wii.glossy(contentRect, radius: radius, rim: borderColor, rimWidth: 2, maxGlass: 30)
+        Wii.glossy(contentRect, radius: radius, rim: borderColor, rimWidth: 2, maxGlass: glass)
     }
 }
 
@@ -301,6 +306,10 @@ final class WiiSelector: FlippedView {
     var title: String
     var value = "" { didSet { needsDisplay = true } }
     var onClick: (() -> Void)?
+    /// One row: the label on the left and the value's pill on the right (settings rows), instead of label above pill.
+    var inline = false { didSet { needsDisplay = true } }
+    /// Width of the pill in the inline style.
+    var pillWidth: CGFloat = 170 { didSet { needsDisplay = true } }
     private var hover = false
 
     init(_ title: String) {
@@ -320,6 +329,17 @@ final class WiiSelector: FlippedView {
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
 
     override func draw(_ dirtyRect: NSRect) {
+        if inline {
+            // Same height as a toggle's switch, so the rows match.
+            let pill = NSRect(x: bounds.width - pillWidth, y: (bounds.height - 28) / 2, width: pillWidth, height: 28)
+            Wii.drawText(title, in: NSRect(x: 0, y: 0, width: pill.minX - 8, height: bounds.height), size: 14, centerV: true)
+            Wii.tile(pill, radius: 8, fill: .white, bottom: Wii.tileLow, border: hover ? Wii.blue : Wii.border, borderWidth: 2, shadow: false)
+            Wii.drawText(value, in: NSRect(x: pill.minX + 12, y: pill.minY, width: pill.width - 40, height: pill.height), size: 13,
+                         centerV: true, truncate: true)
+            Wii.drawText("›", in: NSRect(x: pill.maxX - 22, y: pill.minY, width: 14, height: pill.height), size: 17,
+                         color: Wii.textSoft, centerV: true)
+            return
+        }
         Wii.drawText(title, in: NSRect(x: 0, y: 0, width: bounds.width, height: 20), size: 13, color: Wii.textSoft)
         let pill = NSRect(x: 0, y: 22, width: bounds.width, height: bounds.height - 24)
         Wii.tile(pill, radius: 8, fill: .white, bottom: Wii.tileLow, border: hover ? Wii.blue : Wii.border, borderWidth: 2, shadow: false)
@@ -334,6 +354,10 @@ final class WiiSlider: FlippedView {
     var title: String
     var value: CGFloat = 1 { didSet { needsDisplay = true } }
     var onChange: ((CGFloat) -> Void)?
+    /// One row: label, then the groove, then the value (settings rows), instead of label and value above the groove.
+    var inline = false { didSet { needsDisplay = true } }
+    /// Width of the groove and value in the inline style (they sit at the right, like the other rows' controls).
+    var trackWidth: CGFloat = 170 { didSet { needsDisplay = true } }
 
     init(_ title: String) {
         self.title = title
@@ -341,7 +365,11 @@ final class WiiSlider: FlippedView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    private var track: NSRect { NSRect(x: 12, y: 30, width: bounds.width - 24, height: 10) }
+    private var track: NSRect {
+        // Inline: the groove ends 48 pt from the right edge, leaving room for "100%".
+        if inline { return NSRect(x: bounds.width - trackWidth + 11, y: bounds.midY - 5, width: trackWidth - 11 - 11 - 48, height: 10) }
+        return NSRect(x: 12, y: 30, width: bounds.width - 24, height: 10)
+    }
     override func mouseDown(with event: NSEvent) { set(from: event) }
     override func mouseDragged(with event: NSEvent) { set(from: event) }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
@@ -353,9 +381,15 @@ final class WiiSlider: FlippedView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        Wii.drawText(title, in: NSRect(x: 12, y: 0, width: bounds.width - 84, height: 22), size: 14)
-        Wii.drawText("\(Int((value * 100).rounded()))%", in: NSRect(x: bounds.width - 72, y: 0, width: 60, height: 22),
-                     size: 14, bold: true, color: Wii.textSoft, align: .right)
+        if inline {
+            Wii.drawText(title, in: NSRect(x: 0, y: 0, width: bounds.width - trackWidth - 8, height: bounds.height), size: 14, centerV: true)
+            Wii.drawText("\(Int((value * 100).rounded()))%", in: NSRect(x: bounds.width - 46, y: 0, width: 46, height: bounds.height),
+                         size: 13, bold: true, color: Wii.textSoft, align: .right, centerV: true)
+        } else {
+            Wii.drawText(title, in: NSRect(x: 12, y: 0, width: bounds.width - 84, height: 22), size: 14)
+            Wii.drawText("\(Int((value * 100).rounded()))%", in: NSRect(x: bounds.width - 72, y: 0, width: 60, height: 22),
+                         size: 14, bold: true, color: Wii.textSoft, align: .right)
+        }
         let t = track
         // sunken groove
         let groove = NSBezierPath(roundedRect: t, xRadius: 5, yRadius: 5)

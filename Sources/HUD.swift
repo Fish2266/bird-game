@@ -185,6 +185,9 @@ final class HUDView: NSView {
     private let bannerLabel = WiiLabel(16, bold: true)
     private let invitePanel = WiiPanel()
     private let inviteLabel = WiiLabel(15, bold: true)
+    private let toast = ToastView()
+    private var toasts: [(String, String, NSColor)] = []
+    private var toastUntil = Date.distantPast
     private var lastPhase = MatchPhase.warmup
     private var goUntil = Date.distantPast
     private var racing = false
@@ -194,7 +197,11 @@ final class HUDView: NSView {
     var showHelp = false { didSet { helpBox.isHidden = !showHelp } }
     /// Top of the help box when it's shown (things at the bottom left go above it).
     var helpTop: CGFloat { showHelp ? helpBox.frame.maxY + 6 : 16 }
-    var showPreview = true { didSet { preview?.isHidden = !showPreview } }
+    var showPreview = true { didSet { preview?.isHidden = !showPreview; needsLayout = true } }
+    /// The small frame-rate readout under the speed box.
+    var showFPS = true { didSet { status.isHidden = !showFPS } }
+    /// The camera picture is shown bigger while the tutorial is teaching you to get in view.
+    var previewScale: CGFloat = 1 { didSet { if previewScale != oldValue { needsLayout = true } } }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -263,16 +270,17 @@ final class HUDView: NSView {
         helpBox.addSubview(help)
         helpTitle.text = "How to fly"
         help.text = """
-        Flap your arms down to climb and speed up.
-        Raise one arm and lower the other to turn.
-        Arms up a little: nose up. Down a little: nose down.
-        Arms at your sides: dive.
+        Flap your arms down to speed up and climb.
+        Tip your arms like wings to turn.
+        Hold both arms UP (above your shoulders) to fly up.
+        Hold them a little low to fly down. Tuck them in to dive.
         Fly through the rings to earn ● coins.
 
         Open your mouth wide to attack (in fights).
 
-        Keys: ←→ bank, ↑↓ pitch, Space flap, Shift dive, Return attack
-        Esc pause, modes & shop · R recalibrate · H hide help · T chat
+        Keys: ←→ turn · ↑↓ up / down · Space flap · Shift dive
+        Return attack · Esc menu · N restart · T chat
+        R recalibrate · H help · C camera · P photo
         """
         addSubview(gauge)
         addSubview(status)
@@ -299,6 +307,8 @@ final class HUDView: NSView {
         addSubview(invitePanel)
         results.isHidden = true
         addSubview(results)
+        toast.isHidden = true
+        addSubview(toast)
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -333,10 +343,13 @@ final class HUDView: NSView {
         ring.frame = NSRect(x: b.width / 2 - 120, y: b.height - 160, width: 240, height: 18)
         flash.frame = NSRect(x: b.width / 2 - 300, y: b.height / 2 + 60, width: 600, height: 44)
 
-        let pw: CGFloat = 320, ph: CGFloat = pw / (preview.map { CGFloat($0.aspectForLayout) } ?? 4.0 / 3.0)
+        let pw: CGFloat = 320 * previewScale, ph: CGFloat = pw / (preview.map { CGFloat($0.aspectForLayout) } ?? 4.0 / 3.0)
         preview?.frame = NSRect(x: b.width - pw - 20, y: 20, width: pw, height: ph)
-        gauge.frame = NSRect(x: b.width - pw - 20 - 150, y: 16, width: 140, height: 122)
-        helpBox.frame = NSRect(x: 16, y: 16, width: 430, height: 246)
+        // The wings / flap meter sits left of the camera picture, or in its corner when the picture is off.
+        let pictureShown = showPreview && preview != nil
+        gauge.frame = NSRect(x: pictureShown ? b.width - pw - 20 - 150 : b.width - 156, y: 16, width: 140, height: 122)
+        // Tall enough for the text (8 px panel inset, 42 above it, 12 below).
+        helpBox.frame = NSRect(x: 16, y: 16, width: 430, height: max(200, help.fittingHeight(width: 430 - 8 - 32) + 62))
         let hc = helpBox.contentRect
         helpTitle.frame = NSRect(x: hc.minX + 16, y: hc.minY + 14, width: hc.width - 32, height: 22)
         help.frame = NSRect(x: hc.minX + 16, y: hc.minY + 42, width: hc.width - 32, height: hc.height - 50)
@@ -355,6 +368,35 @@ final class HUDView: NSView {
         inviteLabel.frame = invitePanel.contentRect.insetBy(dx: 16, dy: 0).offsetBy(dx: 0, dy: 1)
         let rh = results.height
         results.frame = NSRect(x: b.width / 2 - 250, y: (b.height - rh) / 2, width: 500, height: rh)
+        toast.frame = NSRect(x: b.width / 2 - 250, y: b.height - 250, width: 500, height: 70)
+    }
+
+    // MARK: Toasts (goals, updates)
+
+    /// A card that slides in near the top for a few seconds ("Goal complete!"). Several queue up.
+    func showToast(_ title: String, _ detail: String, color: NSColor = Rarity.earned.color) {
+        toasts.append((title, detail, color))
+        if toast.isHidden { nextToast() }
+    }
+
+    private func nextToast() {
+        guard !toasts.isEmpty else {
+            NSAnimationContext.runAnimationGroup({ $0.duration = 0.25; toast.animator().alphaValue = 0 }, completionHandler: { [weak self] in
+                guard let self, self.toasts.isEmpty else { return }
+                self.toast.isHidden = true
+            })
+            return
+        }
+        let (t, d, c) = toasts.removeFirst()
+        toast.title = t; toast.detail = d; toast.accent = c
+        toast.isHidden = false
+        toast.alphaValue = 0
+        NSAnimationContext.runAnimationGroup { $0.duration = 0.25; toast.animator().alphaValue = 1 }
+        toastUntil = Date().addingTimeInterval(4)
+    }
+
+    private func tickToast() {
+        if !toast.isHidden && toast.alphaValue > 0.99 && Date() > toastUntil { nextToast() }
     }
 
     // MARK: Modes
@@ -505,7 +547,7 @@ final class HUDView: NSView {
         details.text = s.mode == .freeRoam ? String(format: "Height %.0f m   Rings %d", s.agl, s.score)
             : (s.multiplayer ? String(format: "Height %.0f m   %d players", s.agl, s.players) : String(format: "Height %.0f m", s.agl))
         streakLabel.isHidden = !s.streakEnabled
-        let bonus = 1 + 0.25 * Double(min(max(s.streak - 1, 0), 8))
+        let bonus = Double(Progress.streakBonus(s.streak))
         streakLabel.text = s.streak > 1 ? String(format: "Streak %d · ×%.2f", s.streak, bonus) : "Streak \(s.streak)"
         threatBox.isHidden = s.threat == nil
         threatLabel.text = s.threat ?? ""
@@ -542,5 +584,33 @@ final class HUDView: NSView {
         preview?.caption.text = "\(cameraName) · \(mode)"
         status.text = String(format: "%.0f fps", s.fps)
         updateModes(s)
+        tickToast()
+    }
+}
+
+/// "Goal complete!" style card: a colored badge, a bold title and a line of detail.
+final class ToastView: FlippedView {
+    var title = "" { didSet { needsDisplay = true } }
+    var detail = "" { didSet { needsDisplay = true } }
+    var accent = Rarity.earned.color { didSet { needsDisplay = true } }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let r = bounds.insetBy(dx: 4, dy: 4)
+        Wii.glossy(r, radius: 14, rim: accent, rimWidth: 2.5, maxGlass: 34)
+        let badge = NSRect(x: r.minX + 14, y: r.midY - 19, width: 38, height: 38)
+        accent.setFill(); NSBezierPath(ovalIn: badge).fill()
+        // A star in the badge.
+        let star = NSBezierPath()
+        for i in 0..<10 {
+            let a = CGFloat(i) / 10 * 2 * .pi - .pi / 2
+            let rad: CGFloat = i % 2 == 0 ? 13 : 5.5
+            let p = NSPoint(x: badge.midX + cos(a) * rad, y: badge.midY + sin(a) * rad)
+            if i == 0 { star.move(to: p) } else { star.line(to: p) }
+        }
+        star.close()
+        NSColor.white.setFill(); star.fill()
+        let tx = badge.maxX + 14
+        Wii.drawText(title, in: NSRect(x: tx, y: r.minY + 11, width: r.maxX - tx - 12, height: 22), size: 16, bold: true, truncate: true)
+        Wii.drawText(detail, in: NSRect(x: tx, y: r.minY + 35, width: r.maxX - tx - 12, height: 20), size: 13, color: Wii.textSoft, truncate: true)
     }
 }

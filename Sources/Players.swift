@@ -8,6 +8,7 @@ final class OtherBird {
     let root = SCNNode()
     private(set) var bird: BirdNode
     private(set) var speciesId: String
+    private(set) var outfitCode: String
     private(set) var name: String
     private(set) var colorIndex: Int
     let isBot: Bool
@@ -37,15 +38,20 @@ final class OtherBird {
     private var glowing = false
     private var snaps: [(t: Double, s: NetState)] = []
     private var deadFade: Float = 0
+    private var wasAlive = true
+    /// The name tag says "paused" (LAN players with their menu open).
+    private var tagPaused = false
 
-    init(id: Int, name: String, color: Int, species: String, bot: Bool = false) {
+    init(id: Int, name: String, color: Int, species: String, outfit: String = "", bot: Bool = false) {
         self.id = id
         self.name = name
         colorIndex = color
         speciesId = species
+        outfitCode = outfit
         isBot = bot
-        bird = BirdNode(look: Catalog.species(species).look)
+        bird = BirdNode(look: Catalog.species(species).look, outfit: Outfit(code: outfit))
         root.addChildNode(bird.node)
+        root.addChildNode(bird.fxRoot)
 
         let bb = SCNBillboardConstraint()
         bb.freeAxes = .all
@@ -93,7 +99,7 @@ final class OtherBird {
     private func applyIdentity() {
         let m = SCNMaterial()
         m.lightingModel = .constant
-        let img = OtherBird.tagImage(name, color: NameColors.ns(colorIndex), bot: isBot)
+        let img = OtherBird.tagImage(name, color: NameColors.ns(colorIndex), bot: isBot, paused: tagPaused)
         m.diffuse.contents = img
         m.isDoubleSided = true
         m.writesToDepthBuffer = false
@@ -103,20 +109,24 @@ final class OtherBird {
         if glowing { bird.setOutline(NameColors.ns(colorIndex)) }
     }
 
-    func setSpecies(_ sp: String) {
-        guard sp != speciesId else { return }
+    /// Change bird and / or outfit (rebuilds the model only when something changed).
+    func setLook(species sp: String, outfit fit: String) {
+        guard sp != speciesId || fit != outfitCode else { return }
         speciesId = sp
-        let fresh = BirdNode(look: Catalog.species(sp).look)
+        outfitCode = fit
+        let fresh = BirdNode(look: Catalog.species(sp).look, outfit: Outfit(code: fit))
         fresh.node.simdTransform = bird.node.simdTransform
         bird.node.removeFromParentNode()
+        bird.fxRoot.removeFromParentNode()
         root.addChildNode(fresh.node)
+        root.addChildNode(fresh.fxRoot)
         bird = fresh
         if glowing { bird.setOutline(NameColors.ns(colorIndex)) }
     }
 
     /// Nametag pill: the player's color with their name in white.
-    static func tagImage(_ name: String, color: NSColor, bot: Bool) -> NSImage {
-        let label = bot ? "\(name) (bot)" : name
+    static func tagImage(_ name: String, color: NSColor, bot: Bool, paused: Bool = false) -> NSImage {
+        let label = (bot ? "\(name) (bot)" : name) + (paused ? "  \u{275A}\u{275A} paused" : "")
         let textW = (label as NSString).size(withAttributes: [.font: Wii.font(34, bold: true)]).width
         return NSImage(size: NSSize(width: max(200, textW + 90), height: 80), flipped: false) { r in
             let pill = NSBezierPath(roundedRect: r.insetBy(dx: 3, dy: 8), xRadius: 32, yRadius: 32)
@@ -161,7 +171,7 @@ final class OtherBird {
         flags = s.flags
         hp = s.hp
         progress = s.progress
-        setSpecies(s.bird)
+        setLook(species: s.bird, outfit: s.fit)
     }
 
     /// Show the network bird a little in the past (just enough to cover the network's hiccups),
@@ -202,14 +212,24 @@ final class OtherBird {
         guard visible else { return }
         bird.node.simdPosition = pos
         bird.node.simdOrientation = rot
+        bird.tick(dt: dt, speed: simd_length(vel), camera: camera, emitting: alive && !paused)
+        if wasAlive && !alive { puff() }
+        wasAlive = alive
+        // (Birds never fade with opacity: that makes SceneKit build see-through versions of every material on the
+        // spot, which stalls a frame for up to a second mid-fight.)
         if alive {
             bird.pose(left: WingPose(elevation: wings.x, bend: wings.z), right: WingPose(elevation: wings.y, bend: wings.z),
                       fold: wings.w, pitchIn: 0, rollIn: 0, dt: dt)
-            bird.node.opacity = paused ? 0.55 : 1
+            bird.node.simdScale = SIMD3(repeating: 1)
         } else {
-            // Knocked out: tumble and fade.
-            bird.node.simdOrientation = rot * simd_quatf(angle: (1 - deadFade) * 9, axis: SIMD3(1, 0.3, 0))
-            bird.node.opacity = CGFloat(deadFade)
+            // Knocked out: tumble and shrink away.
+            let k = deadFade
+            bird.node.simdOrientation = rot * simd_quatf(angle: (1 - k) * 9, axis: SIMD3(1, 0.3, 0))
+            bird.node.simdScale = SIMD3(repeating: max(0.001, k * k * (3 - 2 * k)))
+        }
+        if paused != tagPaused {
+            tagPaused = paused
+            applyIdentity()
         }
         if showLocation != glowing {
             glowing = showLocation
@@ -273,6 +293,47 @@ final class OtherBird {
             f.simdPosition = pos
             f.particleSystems?.first?.birthRate = burning ? 60 : 0
         }
+    }
+
+    /// A puff of feathers where the bird was knocked out.
+    private func puff() {
+        let c = bird.look.body
+        let n = OtherBird.featherPuff(color: NSColor(srgbRed: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: 1))
+        n.simdPosition = pos
+        root.addChildNode(n)
+        n.runAction(.sequence([.wait(duration: 1.6), .removeFromParentNode()]))
+    }
+
+    static func featherPuff(color: NSColor) -> SCNNode {
+        let n = SCNNode()
+        let ps = SCNParticleSystem()
+        ps.loops = false
+        ps.emissionDuration = 0.08
+        ps.birthRate = 260
+        ps.particleLifeSpan = 1.1
+        ps.particleLifeSpanVariation = 0.3
+        ps.emitterShape = SCNSphere(radius: 0.4)
+        ps.birthLocation = .volume
+        ps.spreadingAngle = 180
+        ps.particleVelocity = 6
+        ps.particleVelocityVariation = 3
+        ps.dampingFactor = 2.5
+        ps.acceleration = SCNVector3(0, -2.5, 0)
+        ps.particleSize = 0.35
+        ps.particleSizeVariation = 0.15
+        ps.particleAngularVelocity = 240
+        ps.particleAngularVelocityVariation = 180
+        ps.particleImage = TrailSprites.leaf
+        ps.particleColor = color
+        ps.particleColorVariation = SCNVector4(0, 0, 0.25, 0)
+        ps.isLightingEnabled = false
+        ps.blendMode = .alpha
+        let fade = CAKeyframeAnimation()
+        fade.values = [1, 1, 0]
+        fade.keyTimes = [0, 0.6, 1]
+        ps.propertyControllers = [.opacity: SCNParticlePropertyController(animation: fade)]
+        n.addParticleSystem(ps)
+        return n
     }
 
     /// Wing pose to publish for this bird (bots fill this in themselves).

@@ -10,6 +10,8 @@ struct Hello: Codable {
     var bird: String
     var version: Int
     var instance: String
+    /// Outfit code (see `Outfit.code`).
+    var fit = ""
 }
 
 /// What the host tells everyone about the game.
@@ -195,7 +197,7 @@ private final class Conn {
 /// Each player flies their own bird; the shooter decides what their attacks hit.
 final class LANSession: NetLink {
     static let serviceType = "_birdgame._tcp"
-    static let protocolVersion = 4
+    static let protocolVersion = 5
     static let maxPlayers = 8
     /// Fixed port, so friends can also join by typing the host's address (falls back to any free port).
     static let port: UInt16 = 47474
@@ -235,6 +237,8 @@ final class LANSession: NetLink {
     var name = "Player"
     var color = 0
     var bird = "gull"
+    /// What the local bird is wearing (outfit code).
+    var fit = ""
 
     // Callbacks (main thread)
     var onChange: (() -> Void)?
@@ -249,7 +253,7 @@ final class LANSession: NetLink {
     var onChat: ((ChatLine) -> Void)?
 
     // Network-queue state
-    private var me = (name: "Player", color: 0, bird: "gull")
+    private var me = (name: "Player", color: 0, bird: "gull", fit: "")
     private var listener: NWListener?
     private var browser: NWBrowser?
     private var serviceName = ""
@@ -298,7 +302,7 @@ final class LANSession: NetLink {
         guard role == .offline else { return }
         role = .idle
         status = "Looking for games on your network…"
-        let profile = (name, color, bird)
+        let profile = (name, color, bird, fit)
         q.async { [self] in
             me = profile
             serviceName = "\(profile.0.prefix(30)) · \(instance)"
@@ -414,14 +418,14 @@ final class LANSession: NetLink {
         }
     }
 
-    /// Name, color or bird changed.
+    /// Name, color, bird or outfit changed.
     func updateProfile() {
-        let (n, c, b) = (name, color, bird)
+        let (n, c, b, f) = (name, color, bird, fit)
         q.async { [self] in
-            me = (n, c, b)
+            me = (n, c, b, f)
             readvertise()
             if hostingQ, let i = lobbyQ.players.firstIndex(where: { $0.id == 1 }) {
-                lobbyQ.players[i].name = n; lobbyQ.players[i].color = c; lobbyQ.players[i].bird = b
+                lobbyQ.players[i].name = n; lobbyQ.players[i].color = c; lobbyQ.players[i].bird = b; lobbyQ.players[i].fit = f
                 lobbyQ.hostName = n
                 pushLobby()
             }
@@ -518,7 +522,7 @@ final class LANSession: NetLink {
         conn.id = id
         conn.instance = h.instance
         let n = h.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        conn.info = PeerInfo(id: id, name: String((n.isEmpty ? "Player" : n).prefix(20)), color: h.color, bird: h.bird)
+        conn.info = PeerInfo(id: id, name: String((n.isEmpty ? "Player" : n).prefix(20)), color: h.color, bird: h.bird, fit: h.fit)
         clients[id] = conn
         conn.onMessage = { [weak self] w in self?.fromClient(id, w) }
         conn.onClose = { [weak self] in self?.dropClient(id) }
@@ -534,8 +538,9 @@ final class LANSession: NetLink {
             latest[id] = s
             outbox.append(s)
             deliver([s])
-            if let i = lobbyQ.players.firstIndex(where: { $0.id == id }), lobbyQ.players[i].bird != s.bird {
+            if let i = lobbyQ.players.firstIndex(where: { $0.id == id }), lobbyQ.players[i].bird != s.bird || lobbyQ.players[i].fit != s.fit {
                 lobbyQ.players[i].bird = s.bird
+                lobbyQ.players[i].fit = s.fit
                 pushLobby()
             }
         case .event(let raw):
@@ -584,7 +589,7 @@ final class LANSession: NetLink {
         role = .hosting
         status = "Hosting"
         chat = []
-        let me = PeerInfo(id: 1, name: name, color: color, bird: bird)
+        let me = PeerInfo(id: 1, name: name, color: color, bird: bird, fit: fit)
         lock.lock(); _localId = 1; box = NetInbox(); lock.unlock()
         q.async { [self] in
             hostingQ = true
@@ -667,7 +672,7 @@ final class LANSession: NetLink {
         status = "Joining \(g.hostName)…"
         invites.removeAll { $0.service == g.service }
         onChange?()
-        let hello = Hello(name: name, color: color, bird: bird, version: LANSession.protocolVersion, instance: instance)
+        let hello = Hello(name: name, color: color, bird: bird, version: LANSession.protocolVersion, instance: instance, fit: fit)
         let deadline = uptime() + 9
         q.async { [self] in connect(g, hello: hello, deadline: deadline) }
     }
@@ -1081,8 +1086,8 @@ final class LANSession: NetLink {
         self.problems = problems
         addresses = ["192.168.1.23"]
         listeningPort = LANSession.port
-        lobby = Lobby(hostName: name, players: [PeerInfo(id: 1, name: name, color: color, bird: "eagle"),
-                                                 PeerInfo(id: 2, name: "Alex", color: 5, bird: "falcon"),
+        lobby = Lobby(hostName: name, players: [PeerInfo(id: 1, name: name, color: color, bird: "eagle", fit: "h=crown"),
+                                                 PeerInfo(id: 2, name: "Alex", color: 5, bird: "falcon", fit: "h=cap,e=shades"),
                                                  PeerInfo(id: 3, name: "Sam", color: 2, bird: "sparrow")],
                       rules: MatchRules(collisions: true, pvp: false, showLocation: true), mode: .ringRace, world: "volcano")
         if !hosting { lobby = Lobby() }

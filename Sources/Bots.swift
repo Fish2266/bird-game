@@ -58,7 +58,9 @@ final class BotPilot {
         rng = SplitMix64(seed: seed)
         reaction = 1
         flapPhase = rng.float(0, 6)
-        avatar = OtherBird(id: id, name: name, color: color, species: species.id, bot: true)
+        // Bots dress up too, so players see what's in the shop.
+        var dress = SplitMix64(seed: seed ^ 0xD8E55)
+        avatar = OtherBird(id: id, name: name, color: color, species: species.id, outfit: Outfit.random(&dress).code, bot: true)
         reaction = nextReaction()
     }
 

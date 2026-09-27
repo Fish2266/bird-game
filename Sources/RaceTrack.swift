@@ -404,9 +404,11 @@ final class RaceTrack {
     /// A checkpoint hoop: a big glowing ring with running lights, facing along the course. Start and finish
     /// hoops are checkered and carry a banner above. Returns the node and the materials to recolor.
     private static func arch(center: SIMD3<Float>, tangent: SIMD3<Float>, halfWidth r: Float, finish: Bool, start: Bool = false) -> (SCNNode, [SCNMaterial]) {
+        // The hoop is built around its own centre: the next checkpoint pulses by scaling this node, and a node sitting
+        // at the world's origin would swing the hoop back and forth by a few percent of its distance from there.
         let node = SCNNode()
+        node.simdPosition = center
         let ring = SCNNode()
-        ring.simdPosition = center
         ring.simdOrientation = simd_quatf(from: SIMD3(0, 1, 0), to: simd_normalize(tangent))
         node.addChildNode(ring)
         let special = finish || start
@@ -450,7 +452,7 @@ final class RaceTrack {
             lm.diffuse.contents = RaceTrack.banner(finish ? "FINISH" : "START")
             lm.isDoubleSided = true
             label.geometry?.materials = [lm]
-            label.simdPosition = center + SIMD3(0, r + 2.8, 0)
+            label.simdPosition = SIMD3(0, r + 2.8, 0)
             label.simdOrientation = f.rot
             node.addChildNode(label)
         }

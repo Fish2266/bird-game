@@ -23,6 +23,12 @@ struct WorldInfo {
     var kind: WorldID? { WorldID(rawValue: id) }
     /// Challenge worlds have streaks, hazards and coin penalties. World 1 has none of that.
     var isChallenge: Bool { kind != nil && kind != .meadow }
+    /// Ring multiplier as shown in the shop ("×1.5").
+    var multiplierText: String { ringMultiplier == ringMultiplier.rounded() ? "×\(Int(ringMultiplier))" : String(format: "×%.1f", ringMultiplier) }
+    /// Harder worlds pay a little more for finishing a race.
+    var raceBonus: Float {
+        switch kind { case .volcano?: return 1.15; case .caves?: return 1.3; case .dogfight?: return 1.2; default: return 1 }
+    }
 }
 
 enum WorldCatalog {
@@ -31,13 +37,13 @@ enum WorldCatalog {
                   cost: 0, ringMultiplier: 1, ringBoost: 5, hazards: "None", comingSoon: false,
                   art: [SIMD3(0.38, 0.62, 0.92), SIMD3(0.80, 0.87, 0.95), SIMD3(0.36, 0.52, 0.22), SIMD3(0.10, 0.35, 0.50)]),
         WorldInfo(id: "volcano", name: "Volcano", blurb: "Lava lakes and smoking cones. Geysers blast lava into the sky, but the heat over the lava gives you free lift.",
-                  cost: 250, ringMultiplier: 2, ringBoost: 10, hazards: "Lava geysers, lava lakes", comingSoon: false,
+                  cost: 250, ringMultiplier: 1.5, ringBoost: 10, hazards: "Lava geysers, lava lakes", comingSoon: false,
                   art: [SIMD3(0.30, 0.22, 0.30), SIMD3(0.90, 0.50, 0.32), SIMD3(0.20, 0.17, 0.17), SIMD3(1.00, 0.45, 0.10)]),
         WorldInfo(id: "caves", name: "Glow Caves", blurb: "Mossy tunnels lit by glowing mushrooms. Follow the passages up and down, from tight squeezes to huge caverns.",
-                  cost: 400, ringMultiplier: 3, ringBoost: 6, hazards: "Walls, low ceilings", comingSoon: false,
+                  cost: 400, ringMultiplier: 2, ringBoost: 6, hazards: "Walls, low ceilings", comingSoon: false,
                   art: [SIMD3(0.03, 0.08, 0.10), SIMD3(0.08, 0.20, 0.20), SIMD3(0.16, 0.30, 0.16), SIMD3(0.35, 0.95, 0.90)]),
         WorldInfo(id: "dogfight", name: "Dogfight", blurb: "Patchwork farmland under a big sky, patrolled by WWI biplanes. Stay out of their sights.",
-                  cost: 600, ringMultiplier: 3, ringBoost: 12, hazards: "Biplanes that shoot", comingSoon: false,
+                  cost: 600, ringMultiplier: 1.5, ringBoost: 12, hazards: "Biplanes that shoot", comingSoon: false,
                   art: [SIMD3(0.52, 0.66, 0.84), SIMD3(0.88, 0.86, 0.80), SIMD3(0.62, 0.64, 0.30), SIMD3(0.80, 0.15, 0.12)]),
         WorldInfo(id: "storm", name: "Storm Coast", blurb: "Lightning, gusts and huge updrafts inside the thunderheads.",
                   cost: 0, ringMultiplier: 3, ringBoost: 10, hazards: "Lightning, wind", comingSoon: true,

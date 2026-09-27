@@ -144,37 +144,42 @@ final class Pillars: Obstacle {
             switch style {
             case .seaStack:
                 var rng = SplitMix64(seed: UInt64(bitPattern: Int64(Int(base.x * 7 + base.z * 13))))
-                let rock = RockKit.material(rgb(0.62, 0.57, 0.51))
-                pn.addChildNode(RockKit.stack(height: h, r0: r * 1.15, r1: r * 0.8, rock, &rng))
-                pn.addChildNode(RockKit.mossTop(at: h, radius: r * 0.85, &rng))
-                if floating { pn.addChildNode(RockKit.underside(radius: r * 1.1, rock, &rng)) }
+                let rock = Rocks.material()
+                let stone = SIMD3<Float>(0.60, 0.55, 0.49), grass = SIMD3<Float>(0.33, 0.47, 0.20)
+                let col = Rocks.column(height: h, r0: r * 1.1, r1: r * 0.85, color: stone, grass: grass, material: rock, &rng)
+                pn.addChildNode(col.node)
+                pn.addChildNode(Rocks.turf(on: col.top, color: grass, trees: Int(rng.float(1, 3.99)), &rng))
+                if floating { pn.addChildNode(Rocks.underside(radius: r * 1.3, depth: r * 3.2, color: stone * 0.92, material: rock, &rng)) }
             case .spire:
                 var rng = SplitMix64(seed: UInt64(bitPattern: Int64(Int(base.x * 11 + base.z * 5))))
-                let basalt = RockKit.material(rgb(0.22, 0.19, 0.18), rough: 0.7)
-                // A cluster of hexagonal basalt columns with a glowing seam of lava at the foot.
+                // A cluster of hexagonal basalt columns with glowing lava in the cracks at their tops.
+                var b = Rocks.Builder(), glow = Rocks.Builder()
+                let basaltColor = SIMD3<Float>(0.24, 0.21, 0.20)
                 for j in 0..<6 {
                     let rj = r * rng.float(0.45, 0.7)
                     let hj = h * (j == 0 ? 1 : rng.float(0.55, 0.92))
                     let a = Float(j) * 1.1 + rng.float(0, 0.5)
                     let off = j == 0 ? SIMD2<Float>(0, 0) : SIMD2(cos(a), sin(a)) * r * rng.float(0.5, 0.85)
-                    let col = SCNCylinder(radius: CGFloat(rj), height: CGFloat(hj))
-                    col.radialSegmentCount = 6
-                    col.materials = [basalt]
-                    let cn = SCNNode(geometry: col)
-                    cn.simdPosition = SIMD3(off.x, hj / 2, off.y)
-                    cn.eulerAngles.y = CGFloat(rng.float(0, 1))
-                    cn.eulerAngles.z = CGFloat(rng.float(-0.05, 0.05))
-                    pn.addChildNode(cn)
-                    let capG = SCNCylinder(radius: CGFloat(rj) * 0.92, height: 0.15)
-                    capG.radialSegmentCount = 6
-                    capG.materials = [glowMat(rgb(1, 0.42, 0.1), 1.6)]
-                    let cap = SCNNode(geometry: capG)
-                    cap.simdPosition = SIMD3(off.x, hj + 0.05, off.y)
-                    cap.eulerAngles.y = cn.eulerAngles.y
-                    pn.addChildNode(cap)
+                    let top = Rocks.basalt(radius: rj, height: hj, color: basaltColor, into: &b, at: SIMD3(off.x, 0, off.y),
+                                           yaw: rng.float(0, 1), &rng)
+                    // Glowing lava along the rim of each top (visible from below as a hot edge) and in a seam inside it.
+                    let mid = top.reduce(SIMD3<Float>(repeating: 0), +) / Float(top.count)
+                    let out = top.map { mid + ($0 - mid) * 1.04 + SIMD3(0, 0.05, 0) }
+                    let low = out.map { $0 - SIMD3(0, 0.35, 0) }
+                    let inner = top.map { simd_mix($0, mid, SIMD3(repeating: 0.35)) + SIMD3(0, 0.06, 0) }
+                    for s in 0..<out.count {
+                        let s1 = (s + 1) % out.count
+                        glow.quad(low[s], out[s], out[s1], low[s1], SIMD3(1, 0.42, 0.1))
+                        glow.quad(low[s1], out[s1], out[s], low[s], SIMD3(1, 0.42, 0.1))
+                        glow.quad(out[s], inner[s], inner[s1], out[s1], SIMD3(1, 0.5, 0.14))
+                    }
                 }
+                let rock = Rocks.material()
+                rock.roughness.contents = 0.75
+                pn.addChildNode(b.node(rock))
+                pn.addChildNode(glow.node(glowMat(.white, 1.6)))
                 if floating {
-                    pn.addChildNode(RockKit.underside(radius: r * 1.2, basalt, &rng))
+                    pn.addChildNode(Rocks.underside(radius: r * 1.3, depth: r * 2.6, color: basaltColor, material: rock, &rng))
                 } else {
                     let pool = SCNNode(geometry: SCNCylinder(radius: CGFloat(r) * 1.4, height: 0.3))
                     pool.geometry?.materials = [glowMat(rgb(1, 0.38, 0.08), 1.4)]
@@ -438,25 +443,9 @@ final class Crushers: Obstacle {
             let floor = terrain.height(b.x, b.z)
             let ceil = terrain.ceiling(b.x, b.z) ?? (floor + 30)
             let length = max(ceil - floor, 6)
-            let n = SCNNode()
-            let rockMat = pbr(rgb(0.34, 0.33, 0.36), rough: 0.9)
-            let cone = SCNNode(geometry: SCNCone(topRadius: CGFloat(radius * 1.3), bottomRadius: 0.4, height: CGFloat(length)))
-            cone.geometry?.materials = [rockMat]
-            cone.position = SCNVector3(0, CGFloat(length / 2), 0)
-            n.addChildNode(cone)
-            let shaft = SCNNode(geometry: SCNCylinder(radius: CGFloat(radius * 1.3), height: 40))
-            shaft.geometry?.materials = [rockMat]
-            shaft.position = SCNVector3(0, CGFloat(length) + 20, 0)
-            n.addChildNode(shaft)
-            for k in 0..<5 {
-                let gem = SCNNode(geometry: SCNBox(width: 0.6, height: 1.2, length: 0.6, chamferRadius: 0.1))
-                gem.geometry?.materials = [glowMat(rgb(1, 0.35, 0.55), 2.2)]
-                let a = Float(k) * 1.3
-                let y = length * (0.35 + 0.12 * Float(k))
-                let rr = radius * 1.3 * (y / length) + 0.3
-                gem.simdPosition = SIMD3(cos(a) * rr, y, sin(a) * rr)
-                n.addChildNode(gem)
-            }
+            var rng = SplitMix64(seed: UInt64(bitPattern: Int64(Int(b.x * 5 + b.z * 3))))
+            let n = Rocks.stalactite(length: length, top: length + 40, radius: radius * 1.3, color: SIMD3(0.36, 0.34, 0.40),
+                                     crystal: SIMD3(1, 0.4, 0.62), material: Rocks.material(), &rng)
             node.addChildNode(n)
             rocks.append(Rock(pos: SIMD2(b.x, b.z), floor: floor, ceiling: ceil, offset: Float(i) * period * 0.5, node: n, length: length))
         }
@@ -575,6 +564,13 @@ final class Balloons: Obstacle {
 
     init(frame: PathFrame, pathY: Float) {
         center = frame.origin
+        let red = rgb(0.86, 0.2, 0.16), cream = rgb(0.95, 0.93, 0.86)
+        let markers = [red, cream].map { c -> SCNGeometry in
+            let g = SCNSphere(radius: 0.7)
+            g.segmentCount = 12
+            g.materials = [pbr(c, rough: 0.5)]
+            return g
+        }
         let layout: [(Float, Float)] = [(-7, -24), (4, -8), (-3, 9), (7, 25)]
         for (i, (s, f)) in layout.enumerated() {
             let b = frame.at(s, f, 0)
@@ -586,18 +582,17 @@ final class Balloons: Obstacle {
             cable.geometry?.materials = [pbr(rgb(0.15, 0.15, 0.15), rough: 0.6, metal: 0.6)]
             orientBetween(cable, SIMD3(b.x, g, b.z), top)
             node.addChildNode(cable)
-            let bal = SCNNode()
-            let body = SCNNode(geometry: SCNSphere(radius: 4))
-            body.geometry?.materials = [pbr(rgb(0.72, 0.74, 0.70), rough: 0.6)]
-            body.scale = SCNVector3(1, 1, 2.2)
-            bal.addChildNode(body)
-            for k in 0..<3 {
-                let fin = SCNNode(geometry: SCNBox(width: 0.2, height: 3.2, length: 3, chamferRadius: 0.1))
-                fin.geometry?.materials = [pbr(rgb(0.62, 0.64, 0.60), rough: 0.6)]
-                fin.eulerAngles.z = CGFloat(Float(k) * 2.1)
-                fin.position = SCNVector3(0, 0, 8)
-                fin.pivot = SCNMatrix4MakeTranslation(0, -2.4, 0)
-                bal.addChildNode(fin)
+            let bal = Balloons.blimp(fin: i % 2 == 0 ? red : cream)
+            // Red and white marker balls so the cable can be seen from a distance.
+            let len = top.y - g
+            var k: Float = 10
+            var alt = i % 2 == 0
+            while k < len - 4 {
+                let ball = SCNNode(geometry: markers[alt ? 0 : 1])
+                ball.simdPosition = SIMD3(b.x, g + k, b.z)
+                node.addChildNode(ball)
+                alt.toggle()
+                k += 11
             }
             bal.simdPosition = top + SIMD3(0, 3, 0)
             bal.simdOrientation = frame.rot
@@ -608,6 +603,38 @@ final class Balloons: Obstacle {
 
     func update(time: Float) {
         for (n, p, ph) in balloonNodes { n.simdPosition = p + SIMD3(0, sin(time * 0.7 + ph) * 0.6, 0) }
+    }
+
+    /// A barrage balloon about 18 m long lying along -Z: a fat rounded nose, a tapering tail with three fins,
+    /// and a coloured band.
+    static func blimp(fin: NSColor) -> SCNNode {
+        let n = SCNNode()
+        func radius(_ u: Float) -> Float { 4.1 * pow(max(sin(.pi * u), 0), 0.55) * (0.72 + 0.28 * u) }
+        let prof = (0...18).map { k -> SIMD2<Float> in
+            let u = Float(k) / 18
+            return SIMD2(radius(u), -9 + 18 * u)
+        }
+        let body = SCNNode(geometry: Shapes.lathe(prof, segments: 22, crease: 2))
+        body.geometry?.materials = [pbr(rgb(0.80, 0.81, 0.78), rough: 0.45)]
+        body.eulerAngles.x = -.pi / 2   // lathe axis (+Y, nose) → -Z
+        n.addChildNode(body)
+        let band = (0...4).map { k -> SIMD2<Float> in
+            let u: Float = 0.64 + Float(k) / 4 * 0.07
+            return SIMD2(radius(u) + 0.05, -9 + 18 * u)
+        }
+        let bandNode = SCNNode(geometry: Shapes.lathe(band, segments: 22, crease: 2))
+        bandNode.geometry?.materials = [pbr(fin, rough: 0.5)]
+        bandNode.eulerAngles.x = -.pi / 2
+        n.addChildNode(bandNode)
+        for k in 0..<3 {
+            let f = SCNNode(geometry: SCNBox(width: 0.35, height: 3.6, length: 4.2, chamferRadius: 0.17))
+            f.geometry?.materials = [pbr(fin, rough: 0.5)]
+            let a = Float(k) * 2 * .pi / 3 + .pi / 2
+            f.simdPosition = SIMD3(cos(a) * 2.6, sin(a) * 2.6, 6.2)
+            f.simdOrientation = simd_quatf(angle: a - .pi / 2, axis: SIMD3(0, 0, 1))
+            n.addChildNode(f)
+        }
+        return n
     }
     func push(_ p: SIMD3<Float>, radius: Float, time: Float) -> SIMD3<Float>? {
         for c in cables { if let v = c.push(p, radius) { return v } }
@@ -628,24 +655,24 @@ final class StoneArch: Obstacle {
     private var shapes: [Capsule] = []
     private var bases: [OBox] = []
 
-    /// A natural rock arch the course flies under: two boulder legs joined by a curved span.
+    /// A natural rock arch the course flies under: two rock legs joined by a curved span.
     init(frame: PathFrame, halfWidth: Float = 10, floating: Bool = false) {
         center = frame.origin
         var rng = SplitMix64(seed: UInt64(bitPattern: Int64(Int(frame.origin.x * 3 + frame.origin.z * 17))))
-        let rock = RockKit.material(rgb(0.66, 0.60, 0.52))
+        let rock = Rocks.material()
+        let stone = SIMD3<Float>(0.64, 0.58, 0.50), grass = SIMD3<Float>(0.33, 0.47, 0.20)
         let springY = frame.origin.y + 7
         if floating {
-            // Floating arch: a rocky base under the path holds the two legs.
+            // Floating arch: a slab of rock under the path holds the two legs.
             let base = OBox(center: frame.origin - SIMD3(0, 14, 0), rot: frame.rot, half: SIMD3(halfWidth + 4, 3, 4))
             bases.append(base)
-            for k in 0..<7 {
+            let slab = (0...6).map { k -> SIMD3<Float> in
                 let t = Float(k) / 6 * 2 - 1
-                let b = RockKit.boulder(4.2 * (1 - abs(t) * 0.3), rock, &rng)
-                b.simdPosition = frame.at(t * (halfWidth + 2), rng.float(-1, 1), -14)
-                node.addChildNode(b)
+                return frame.at(t * (halfWidth + 3), 0, -14 + (1 - t * t) * 0.8)
             }
-            let under = RockKit.underside(radius: halfWidth * 0.7, rock, &rng)
-            under.simdPosition = frame.origin - SIMD3(0, 16, 0)
+            node.addChildNode(Rocks.span(slab, radius: 3.6, color: stone, grass: grass, material: rock, &rng))
+            let under = Rocks.underside(radius: halfWidth * 0.75, depth: halfWidth * 1.6, color: stone * 0.92, material: rock, &rng)
+            under.simdPosition = frame.origin - SIMD3(0, 15.5, 0)
             node.addChildNode(under)
         }
         for sgn: Float in [-1, 1] {
@@ -654,25 +681,19 @@ final class StoneArch: Obstacle {
             let bottomY = floating ? frame.origin.y - 13 : min(g, 0) - 4
             let h = springY - bottomY
             shapes.append(Capsule(a: SIMD3(b.x, bottomY, b.z), b: SIMD3(b.x, springY, b.z), r: 3.3))
-            let leg = RockKit.stack(height: h, r0: 4.2, r1: 3.2, rock, &rng)
-            leg.simdPosition = SIMD3(b.x, bottomY, b.z)
-            node.addChildNode(leg)
+            let leg = Rocks.column(height: h + 1.5, r0: 4.2, r1: 3.3, color: stone, grass: grass, material: rock, &rng)
+            leg.node.simdPosition = SIMD3(b.x, bottomY, b.z)
+            node.addChildNode(leg.node)
         }
-        // The span: boulders along a flattened half circle.
-        var last: SIMD3<Float>?
-        let n = 11
+        // The span: a lumpy rock bridge along a flattened half circle, grassy on top.
+        var path: [SIMD3<Float>] = []
+        let n = 12
         for k in 0...n {
             let th = Float.pi * Float(k) / Float(n)
-            let p = frame.at(-cos(th) * halfWidth, 0, 0) + SIMD3(0, (springY - frame.origin.y) + sin(th) * halfWidth * 0.55, 0)
-            let b = RockKit.boulder(3.3 + (k == 0 || k == n ? 0.6 : 0), rock, &rng)
-            b.simdPosition = p
-            node.addChildNode(b)
-            if let l = last { shapes.append(Capsule(a: l, b: p, r: 3)) }
-            last = p
+            path.append(frame.at(-cos(th) * halfWidth, 0, 0) + SIMD3(0, (springY - frame.origin.y) + sin(th) * halfWidth * 0.55, 0))
         }
-        node.addChildNode(RockKit.mossTop(at: 0, radius: 3, &rng).then {
-            $0.simdPosition = frame.origin + SIMD3(0, springY - frame.origin.y + halfWidth * 0.55 + 2.2, 0)
-        })
+        for k in 1...n { shapes.append(Capsule(a: path[k - 1], b: path[k], r: 3)) }
+        node.addChildNode(Rocks.span(path, radius: 2.9, color: stone, grass: grass, material: rock, &rng))
         node.enumerateHierarchy { n, _ in n.castsShadow = true }
     }
 
@@ -681,84 +702,6 @@ final class StoneArch: Obstacle {
         for c in shapes { if let v = c.push(p, radius) { return v } }
         for b in bases { if let v = b.push(p, radius) { return v } }
         return nil
-    }
-}
-
-/// Natural-looking rock pieces built from lumpy, textured boulders.
-enum RockKit {
-    static let texture: CGImage = TerrainManager.detailTexture()
-
-    static func material(_ c: NSColor, rough: CGFloat = 0.95) -> SCNMaterial {
-        let m = SCNMaterial()
-        m.lightingModel = .physicallyBased
-        m.diffuse.contents = texture
-        m.diffuse.wrapS = .repeat
-        m.diffuse.wrapT = .repeat
-        m.diffuse.contentsTransform = SCNMatrix4MakeScale(3, 3, 1)
-        m.multiply.contents = c
-        m.roughness.contents = rough
-        return m
-    }
-
-    /// A lumpy boulder about `r` across.
-    static func boulder(_ r: Float, _ m: SCNMaterial, _ rng: inout SplitMix64) -> SCNNode {
-        let g = SCNSphere(radius: CGFloat(r))
-        g.segmentCount = 10
-        g.materials = [m]
-        let n = SCNNode(geometry: g)
-        n.scale = SCNVector3(rng.float(0.85, 1.15), rng.float(0.6, 0.85), rng.float(0.85, 1.15))
-        n.eulerAngles = SCNVector3(rng.float(-0.25, 0.25), rng.float(0, 6.28), rng.float(-0.25, 0.25))
-        return n
-    }
-
-    /// A column of stacked boulders from y = 0 up to `h`, tapering from `r0` to `r1`, with a few ledges.
-    static func stack(height h: Float, r0: Float, r1: Float, _ m: SCNMaterial, _ rng: inout SplitMix64) -> SCNNode {
-        let n = SCNNode()
-        var y: Float = 0
-        while y < h {
-            let t = y / max(h, 1)
-            let r = lerp(r0 * 1.2, r1, sqrt(t)) * rng.float(0.8, 1.15)
-            let b = boulder(r, m, &rng)
-            b.simdPosition = SIMD3(rng.float(-0.35, 0.35) * r, y + r * 0.5, rng.float(-0.35, 0.35) * r)
-            n.addChildNode(b)
-            if rng.float() < 0.55 {
-                let a = rng.float(0, 6.28)
-                let side = boulder(r * rng.float(0.45, 0.65), m, &rng)
-                side.simdPosition = SIMD3(cos(a) * r * 0.85, y + r * 0.4, sin(a) * r * 0.85)
-                n.addChildNode(side)
-            }
-            y += r * 0.6
-        }
-        return n
-    }
-
-    /// Grass and a couple of little trees on top of a rock.
-    static func mossTop(at h: Float, radius r: Float, _ rng: inout SplitMix64) -> SCNNode {
-        let n = SCNNode()
-        let moss = SCNNode(geometry: SCNSphere(radius: CGFloat(r)))
-        moss.geometry?.materials = [pbr(rgb(0.30, 0.46, 0.20), rough: 0.95)]
-        moss.scale = SCNVector3(1.1, 0.35, 1.1)
-        moss.simdPosition = SIMD3(0, h + r * 0.15, 0)
-        n.addChildNode(moss)
-        for _ in 0..<Int(rng.float(1, 3.99)) {
-            let t = SCNNode(geometry: SCNCone(topRadius: 0, bottomRadius: CGFloat(r * 0.3), height: CGFloat(r * 1.1)))
-            t.geometry?.materials = [pbr(rgb(0.13, 0.30, 0.14), rough: 0.9)]
-            t.simdPosition = SIMD3(rng.float(-0.5, 0.5) * r, h + r * 0.6, rng.float(-0.5, 0.5) * r)
-            n.addChildNode(t)
-        }
-        return n
-    }
-
-    /// The tapering rocky bottom of a floating island (points down from y = 0).
-    static func underside(radius r: Float, _ m: SCNMaterial, _ rng: inout SplitMix64) -> SCNNode {
-        let n = SCNNode()
-        for k in 0..<5 {
-            let rr = r * (1 - Float(k) * 0.19)
-            let b = boulder(rr, m, &rng)
-            b.simdPosition = SIMD3(rng.float(-0.2, 0.2) * r, -Float(k) * r * 0.55, rng.float(-0.2, 0.2) * r)
-            n.addChildNode(b)
-        }
-        return n
     }
 }
 
@@ -808,7 +751,8 @@ final class BoostRing {
         inner.simdOrientation = simd_quatf(from: SIMD3(0, 0, -1), to: self.normal)
         node.addChildNode(inner)
         node.simdPosition = center
-        node.castsShadow = false
+        // A glowing ring shouldn't throw a dark ring of shadow on the ground (castsShadow isn't inherited).
+        node.enumerateHierarchy { n, _ in n.castsShadow = false }
     }
 
     func update(time: Float, dt: Float) {
