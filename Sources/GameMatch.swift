@@ -887,12 +887,3 @@ struct NetInbox {
     var peers: [PeerInfo]?
     var rules: MatchRules?
 }
-
-struct PeerInfo: Codable, Equatable {
-    var id: Int
-    var name: String
-    var color: Int
-    var bird: String
-    /// Outfit code (hat, glasses, trail…).
-    var fit = ""
-}

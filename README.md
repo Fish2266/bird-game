@@ -6,7 +6,7 @@ Fly a bird by flapping your arms in front of your Mac's camera.
 
 You need a Mac running **macOS 14 Sonoma or newer** with a camera (Apple Silicon or Intel).
 
-1. **Download** `BirdGame-0.3.dmg` from the [latest release](https://github.com/Fish2266/bird-game/releases/latest)
+1. **Download** `BirdGame-0.3.1.dmg` from the [latest release](https://github.com/Fish2266/bird-game/releases/latest)
    (click the file under **Assets**).
 2. **Open** the downloaded file (it's in your Downloads folder). A window appears.
 3. **Drag** the **Bird Game** icon onto the **Applications** folder in that window.
@@ -32,7 +32,7 @@ downloads, checks itself against the fingerprint GitHub publishes, and Bird Game
 outfits and best times carry over. You can also use **Bird Game → Check for Updates…**, or turn automatic checks off
 in that menu.
 
-Coming from 0.2 or 0.2.1? Download 0.3 once as above and choose **Replace** when you drag it into Applications.
+Coming from 0.2 or 0.2.1? Download the latest version once as above and choose **Replace** when you drag it into Applications.
 
 If Bird Game can't replace itself (for example when it's running straight from the downloaded DMG, or on a Mac where
 you're not allowed to change apps), the menu offers the download page instead.
@@ -115,6 +115,7 @@ All race courses also have blue boost rings.
 No server needed: one player hosts and the others join over the same Wi-Fi / network (up to 8 birds).
 Open Esc → LAN, set your name and nametag color, and click **Go online**. Then either **Host a game** or **Join** one
 from the list. Hosts can invite anyone else who is online (they get a "press J to join" banner) and kick players.
+No Mac that can host? An iPhone can: see [Host from an iPhone](#host-from-an-iphone-bird-server).
 
 The host picks the mode and map in the Play tab (everyone switches with them) and starts each race or fight round
 (Start round in the LAN or Play tab, or N). Host settings (all on by default):
@@ -126,8 +127,9 @@ The host picks the mode and map in the Play tab (everyone switches with them) an
 **Chat**: press **T** in the game to type a message to everyone (Return sends, Esc closes); messages show at the
 bottom left for a few seconds. While paused, the LAN tab has the whole conversation and a box to reply.
 
-Everyone needs the **same version** of Bird Game (0.3 can't play with 0.2.x). A friend on another version shows up
-in the list marked "Different version" instead of being hidden. Everyone sees each other's outfits and trails.
+Everyone needs the **same version** of Bird Game: 0.3 and 0.3.1 play together, but neither can play with 0.2.x.
+A friend on another version shows up in the list marked "Different version" instead of being hidden. Everyone sees
+each other's outfits and trails.
 
 ### Can't connect?
 
@@ -141,7 +143,8 @@ The first time you go online, macOS asks two questions. Click **Allow** for both
 The LAN tab warns you (with an **Open Settings** button) if either one is blocking you.
 
 **School or work Macs** often have firewall settings you can't change. Only the **host** needs to accept incoming
-connections: joining always works. So have a friend with a personal Mac host, and everyone else joins their game.
+connections: joining always works. So have a friend with a personal Mac host (or host from an iPhone with Bird Server,
+below), and everyone else joins their game. From 0.3.1, invites reach these Macs too.
 
 If your friend's game doesn't show up in the list, the network may be hiding games from each other (common on
 mesh, school and guest Wi-Fi). The host's LAN tab shows their address (like `192.168.1.23`). Type it into
@@ -149,6 +152,31 @@ mesh, school and guest Wi-Fi). The host's LAN tab shows their address (like `192
 home network or a phone hotspot that you're all connected to.
 
 If someone's Mac sleeps or leaves the Wi-Fi, the others notice within about 8 seconds and carry on without them.
+
+### Host from an iPhone (Bird Server)
+
+**Bird Server** (in `Server/`) is an iPhone app that hosts LAN games without playing in them. Everyone plays on
+their Macs and joins "*name*'s game" from the LAN tab as usual. Any Mac with Bird Game 0.3 or newer can join.
+
+On the phone you pick the mode, map and rules, start rounds (and end one early), and see who's in the game and how
+they're doing. You can invite players who are online, remove players (and allow them back), and chat with everyone.
+The phone needs to be on the same Wi-Fi as the Macs. If the Wi-Fi keeps devices apart, turn on the phone's
+Personal Hotspot and have everyone join that. Bird Server shows the phone's address for **Join by the host's address**.
+
+It keeps hosting when you lock the phone or switch apps, because it plays silence in the background, the one way iOS
+lets an app you installed yourself keep running. Turn that off in its Settings and it keeps the screen on instead.
+
+**Installing it** needs a Mac with Xcode 26 and your iPhone. A free Apple account is enough.
+
+1. In Xcode → Settings → Components, download the **iOS** platform (once; it's big).
+2. Open `Server/BirdServer.xcodeproj`. In the BirdServer target's **Signing & Capabilities**, check that your
+   Personal Team is picked. If Xcode says the bundle identifier isn't available, change it to something of your own.
+3. Plug in the iPhone, pick it as the run destination and click **Run**. The first time, the phone asks you to turn
+   on **Developer Mode** (Settings → Privacy & Security) and to trust your developer certificate
+   (Settings → General → VPN & Device Management).
+4. Tap **Allow** when Bird Server asks to find devices on your local network.
+
+With a free Apple account the app stops opening after 7 days. Run it from Xcode again to renew it.
 
 ## Birds
 
@@ -253,6 +281,10 @@ open "Bird Game.app"
 The version number lives in `Info.plist` (`CFBundleShortVersionString`); the settings screen and About box read it
 from there, so bump it in that one place. The app icon is `Resources/AppIcon.icon` (Icon Composer).
 
+`Shared/` holds the LAN protocol (the wire format, the round director) and Bird Server's host. The game and Bird
+Server (`Server/BirdServer.xcodeproj`, SwiftUI, iOS 17+) both compile it, so they always agree. Changing what goes
+over the network means bumping `LANProtocol.version` (and `gameVersion`), then reinstalling Bird Server too.
+
 ## Debugging
 
 - Tracking stats (no images) are logged to `~/Library/Logs/BirdGame.log`.
@@ -261,7 +293,11 @@ from there, so bump it in that one place. The app icon is `Resources/AppIcon.ico
 - `--dogfight-test` measures how often planes hit a bird flying straight.
 - `--render-test <dir> [seconds] [bird] [world] [mode]` with a mode (`ringRace`, `speedRace`, `pvp`) flies the course / fights the bots with a test pilot.
 - `--net-test` runs a host and three other copies in one process over real Bonjour/TCP (discovery, version check, join by
-  address, state relay, attacks, rounds, chat, heartbeats and dropped players, invite, kick and ban).
+  address, state relay, attacks, rounds, chat, heartbeats and dropped players, invites through the TXT record and
+  directly, kick and ban).
+- `--server-test` does the same with Bird Server's host (`Shared/LANServer.swift`) in place of a playing host: finding and
+  joining it, relay, rounds (and ending one early), rules, chat, invites (TXT and direct), removing players and letting
+  them back, other versions, a full game and stopping. Use `BIRD_LOOPBACK=1` with both.
   Set `BIRD_LOOPBACK=1` to keep it on loopback (a freshly signed build hasn't been granted Local Network access yet).
 - `--scenario-test` checks race and fight flows headless (countdown, pause, ghost, medals, off-course, lives, orbs, spectating).
 - `--pvp-sim [bird] [world] [seconds] [demo|chase]` plays a fight against the bots headless and prints a summary.

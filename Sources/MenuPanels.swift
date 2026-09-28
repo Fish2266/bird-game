@@ -518,7 +518,7 @@ final class LANPanel: FlippedView, NSTextFieldDelegate {
             problem.text = "Bird Game isn't allowed on your local network, so it can't find friends. Turn Bird Game on in Privacy & Security › Local Network, then quit and reopen the game."
         case .firewall?:
             problem.text = lan.firewallManaged
-                ? "This Mac's firewall is managed (by a school or workplace), so friends can't join games you host on it. Joining still works: have a friend with a personal Mac host, then join their game."
+                ? "This Mac's firewall is managed (by a school or workplace), so friends can't join games you host on it. Joining still works: have a friend host from a personal Mac or an iPhone running Bird Server, then join their game."
                 : "Your Mac's firewall is blocking Bird Game, so friends can't join games you host. Allow it in Network › Firewall › Options (\u{201C}Allow incoming connections\u{201D}), or have a friend host. Joining still works."
         case nil: break
         }
@@ -635,7 +635,8 @@ final class LANPanel: FlippedView, NSTextFieldDelegate {
             emptyLeft.isHidden = !(invites.isEmpty && games.isEmpty)
             emptyLeft.text = "No games on your network yet. Ask a friend to host, or host one yourself."
             rightHeader.text = "Online nearby"
-            let peers = lan.nearby
+            // A server (Bird Server on an iPhone) hosts games but isn't someone to play with.
+            let peers = lan.nearby.filter { !$0.server }
             rows(&rightRows, count: peers.count)
             for (i, p) in peers.enumerated() {
                 let row = rightRows[i]

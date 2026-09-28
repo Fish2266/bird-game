@@ -241,7 +241,7 @@ final class Game {
     let reticle = Game.makeReticle()
     let orbs: HealthOrbs?
     /// Fights end after this long, most lives (then health) winning.
-    static let fightLimit: Float = 300
+    static let fightLimit = FightRules.timeLimit
     var ramCooldown: [Int: Float] = [:]
     var obstacleCooldown: Float = 0
     /// ← / → switch who you watch while out of a fight (edge detection).

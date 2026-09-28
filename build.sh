@@ -1,5 +1,6 @@
 #!/bin/zsh
 # Builds "Bird Game.app" next to this script (universal: Apple Silicon + Intel).
+# Shared/ holds the LAN protocol, which Bird Server (the iPhone host app in Server/) compiles too.
 # The version shown in the app comes from Info.plist (CFBundleShortVersionString).
 set -e
 cd "$(dirname "$0")"
@@ -11,7 +12,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 for ARCH in arm64 x86_64; do
   swiftc -O -swift-version 5 -target $ARCH-apple-macos14.0 \
     -framework AppKit -framework SceneKit -framework AVFoundation -framework Vision -framework CoreMedia -framework Network \
-    Sources/*.swift -o "$TMP/BirdGame-$ARCH"
+    Sources/*.swift Shared/*.swift -o "$TMP/BirdGame-$ARCH"
 done
 lipo -create "$TMP"/BirdGame-* -output "$APP/Contents/MacOS/BirdGame"
 cp Info.plist "$APP/Contents/Info.plist"

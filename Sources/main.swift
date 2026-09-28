@@ -347,6 +347,11 @@ if args.contains("--net-test") {
     exit(0)
 }
 
+if args.contains("--server-test") {
+    ServerTest.run()
+    exit(0)
+}
+
 if args.contains("--dogfight-test") {
     // A bird gliding straight and level: how often do the planes land hits?
     TerrainShape.active = FarmTerrain()

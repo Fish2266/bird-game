@@ -515,7 +515,7 @@ final class Combat {
 /// Health, burning and knock-out state for one bird (the local player or a bot).
 struct Fighter {
     static let maxHealth: Float = 100
-    static let startLives = 3
+    static let startLives = FightRules.lives
     var health: Float = Fighter.maxHealth
     var lives = Fighter.startLives
     var burn: Float = 0

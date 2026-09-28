@@ -2,78 +2,7 @@ import AppKit
 import Foundation
 import Network
 
-// MARK: - Wire format
-
-struct Hello: Codable {
-    var name: String
-    var color: Int
-    var bird: String
-    var version: Int
-    var instance: String
-    /// Outfit code (see `Outfit.code`).
-    var fit = ""
-}
-
-/// What the host tells everyone about the game.
-struct Lobby: Codable, Equatable {
-    var hostName = ""
-    var players: [PeerInfo] = []
-    var rules = MatchRules()
-    var mode = GameMode.freeRoam
-    var world = "meadow"
-    /// A round (race / fight) is under way.
-    var running = false
-}
-
-enum Wire: Codable {
-    case hello(Hello)
-    case welcome(id: Int, lobby: Lobby)
-    case reject(String)
-    case invite(from: String, color: Int, service: String)
-    case lobby(Lobby)
-    case kicked
-    case state(NetState)
-    case states([NetState])
-    case event(GameEvent)
-    case match(MatchCommand)
-    case bye
-    /// Heartbeat, so a vanished player (Mac asleep, Wi-Fi gone) is noticed within seconds.
-    case ping
-    case chat(ChatLine)
-}
-
-/// One chat message (or a "joined" / "left" note when `system`).
-struct ChatLine: Codable, Equatable {
-    var id: Int
-    var name: String
-    var color: Int
-    var text: String
-    var system = false
-
-    static let maxLength = 140
-    /// One line, trimmed, not too long; nil when there's nothing to say.
-    static func clean(_ raw: String) -> String? {
-        let one = raw.components(separatedBy: .newlines).joined(separator: " ")
-            .filter { !$0.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) } }
-            .trimmingCharacters(in: .whitespaces)
-        return one.isEmpty ? nil : String(one.prefix(maxLength))
-    }
-}
-
-extension GameEvent {
-    /// The same event with its player ids forced to the sender's (a client can only speak for itself).
-    func from(_ id: Int) -> GameEvent {
-        switch self {
-        case .fire(var s): s.owner = id; return .fire(s)
-        case .hit(var h): h.from = id; return .hit(h)
-        case .died(_, let killer): return .died(victim: id, killer: killer)
-        case .finished(_, let time): return .finished(id: id, time: time)
-        case .respawned: return .respawned(id: id)
-        case .eliminated: return .eliminated(id: id)
-        case .pickup(let orb, _): return .pickup(orb: orb, by: id)
-        }
-    }
-}
+// The wire format, the connection framing and the match director are in Shared/LANProtocol.swift.
 
 /// A game someone is hosting on the local network.
 struct DiscoveredGame: Equatable {
@@ -98,6 +27,8 @@ struct DiscoveredPeer: Equatable {
     var inGame: Bool
     var endpoint: NWEndpoint
     var otherVersion: String? = nil
+    /// A dedicated server (Bird Server on an iPhone): it hosts games but isn't a player.
+    var server = false
 }
 
 struct Invite: Equatable {
@@ -108,101 +39,19 @@ struct Invite: Equatable {
 
 private func uptime() -> Double { ProcessInfo.processInfo.systemUptime }
 
-// MARK: - Connection
-
-/// One TCP connection carrying length-prefixed JSON messages.
-private final class Conn {
-    let c: NWConnection
-    var id = 0
-    var info: PeerInfo?
-    /// The other game's instance id (from its hello).
-    var instance = ""
-    var onMessage: ((Wire) -> Void)?
-    var onClose: (() -> Void)?
-    /// Network queue: when we last heard anything, and when the connection was made.
-    private(set) var lastHeard = uptime()
-    let opened = uptime()
-    private var ready = false
-    private var closed = false
-    private static let encoder = JSONEncoder()
-    private static let decoder = JSONDecoder()
-
-    init(_ c: NWConnection) { self.c = c }
-
-    func start(on q: DispatchQueue) {
-        c.stateUpdateHandler = { [weak self] st in
-            switch st {
-            case .ready: self?.ready = true
-            // Before it connects, "waiting" means the other side can't be reached right now: give up and let the caller retry.
-            case .waiting: if self?.ready == false { self?.finish() }
-            case .failed, .cancelled: self?.finish()
-            default: break
-            }
-        }
-        c.start(queue: q)
-        receive()
-    }
-
-    /// A message framed for sending (encode once, send to many).
-    static func frame(_ w: Wire) -> Data? {
-        guard let body = try? encoder.encode(w) else { return nil }
-        var len = UInt32(body.count).bigEndian
-        var d = Data(bytes: &len, count: 4)
-        d.append(body)
-        return d
-    }
-
-    func send(_ w: Wire, then: ((Bool) -> Void)? = nil) {
-        guard let d = Conn.frame(w) else { return }
-        send(frame: d, then: then)
-    }
-
-    func send(frame d: Data, then: ((Bool) -> Void)? = nil) {
-        guard !closed else { then?(false); return }
-        c.send(content: d, completion: .contentProcessed { err in then?(err == nil) })
-    }
-
-    private func receive() {
-        c.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] head, _, _, err in
-            guard let self else { return }
-            guard err == nil, let head, head.count == 4 else { self.finish(); return }
-            let len = Int(UInt32(bigEndian: head.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }))
-            guard len > 0, len < 4_000_000 else { self.finish(); return }
-            self.c.receive(minimumIncompleteLength: len, maximumLength: len) { body, _, done2, err2 in
-                guard err2 == nil, let body, body.count == len else { self.finish(); return }
-                self.lastHeard = uptime()
-                if let w = try? Conn.decoder.decode(Wire.self, from: body) { self.onMessage?(w) }
-                if done2 { self.finish() } else { self.receive() }
-            }
-        }
-    }
-
-    func close() {
-        c.cancel()
-        finish()
-    }
-
-    private func finish() {
-        guard !closed else { return }
-        closed = true
-        c.cancel()
-        onClose?()
-    }
-}
-
 // MARK: - Session
 
 /// LAN play without a server: every copy of the game advertises itself with Bonjour (so it can be invited),
 /// one player hosts, the others connect straight to the host, and the host relays flight states and events.
 /// Each player flies their own bird; the shooter decides what their attacks hit.
 final class LANSession: NetLink {
-    static let serviceType = "_birdgame._tcp"
-    static let protocolVersion = 5
-    static let maxPlayers = 8
+    static let serviceType = LANProtocol.serviceType
+    static let protocolVersion = LANProtocol.version
+    static let maxPlayers = LANProtocol.maxPlayers
     /// Fixed port, so friends can also join by typing the host's address (falls back to any free port).
-    static let port: UInt16 = 47474
+    static let port = LANProtocol.port
     /// Silence for this long means the other side is gone.
-    static let timeout: Double = 8
+    static let timeout = LANProtocol.timeout
 
     enum Role: Equatable { case offline, idle, joining, hosting, joined }
 
@@ -239,6 +88,8 @@ final class LANSession: NetLink {
     var bird = "gull"
     /// What the local bird is wearing (outfit code).
     var fit = ""
+    /// Test hook: invite only through the TXT record (like a player whose firewall turns away direct invites).
+    var debugNoDirectInvites = false
 
     // Callbacks (main thread)
     var onChange: (() -> Void)?
@@ -275,23 +126,16 @@ final class LANSession: NetLink {
     private var activity: NSObjectProtocol?
     /// Host: recent message times per player (spam guard).
     private var chatTimes: [Int: [Double]] = [:]
+    /// Host: players invited in the last minute (instance id → when the invite lapses), listed in our TXT record.
+    private var invitedQ: [String: Double] = [:]
+    /// Main thread: when each host's latest invite was shown, so one invite never shows twice
+    /// (it can arrive both directly and in the host's TXT record).
+    private var invitesShown: [String: Date] = [:]
 
     // NetLink (any thread, under `lock`)
     private var _localId = 1
     private var box = NetInbox()
     var localId: Int { lock.lock(); defer { lock.unlock() }; return _localId }
-
-    private static func params() -> NWParameters {
-        let tcp = NWProtocolTCP.Options()
-        tcp.noDelay = true
-        tcp.connectionTimeout = 5
-        let p = NWParameters(tls: nil, tcp: tcp)
-        // Also finds Macs nearby over Apple's peer-to-peer Wi-Fi (helps on networks that keep devices apart).
-        p.includePeerToPeer = true
-        // Tests on one Mac: stay on loopback (no Local Network permission needed).
-        if ProcessInfo.processInfo.environment["BIRD_LOOPBACK"] != nil { p.requiredInterfaceType = .loopback }
-        return p
-    }
 
     private static var appVersion: String { AppVersion.short }
 
@@ -328,6 +172,8 @@ final class LANSession: NetLink {
             t["m"] = lobbyQ.mode.rawValue
             t["w"] = lobbyQ.world
             t["p"] = String(lobbyQ.players.count)
+            // Invites ride along here too: a Mac whose firewall turns away the direct kind still sees them.
+            if !invitedQ.isEmpty { t["iv"] = LANProtocol.inviteList(invitedQ.sorted { $0.value < $1.value }.map(\.key)) }
         }
         return t
     }
@@ -336,8 +182,8 @@ final class LANSession: NetLink {
     private func startListener(fixedPort: Bool) {
         let l: NWListener
         do {
-            l = fixedPort ? try NWListener(using: LANSession.params(), on: NWEndpoint.Port(rawValue: LANSession.port)!)
-                          : try NWListener(using: LANSession.params())
+            l = fixedPort ? try NWListener(using: LANProtocol.parameters(), on: NWEndpoint.Port(rawValue: LANSession.port)!)
+                          : try NWListener(using: LANProtocol.parameters())
         } catch {
             if fixedPort { startListener(fixedPort: false) } else { main { $0.setStatus("Couldn't start networking: \(error.localizedDescription)") } }
             return
@@ -353,7 +199,7 @@ final class LANSession: NetLink {
                 let p = l.port?.rawValue
                 self.main { $0.listeningPort = p; $0.onChange?() }
             case .waiting(let e):
-                if LANSession.isPolicyDenied(e) { self.main { $0.flag(.localNetwork, true) } }
+                if LANProtocol.isPolicyDenied(e) { self.main { $0.flag(.localNetwork, true) } }
             case .failed(let e):
                 l.cancel()
                 self.listener = nil
@@ -375,7 +221,7 @@ final class LANSession: NetLink {
     }
 
     private func startBrowser() {
-        let b = NWBrowser(for: .bonjourWithTXTRecord(type: LANSession.serviceType, domain: nil), using: LANSession.params())
+        let b = NWBrowser(for: .bonjourWithTXTRecord(type: LANSession.serviceType, domain: nil), using: LANProtocol.parameters())
         b.browseResultsChangedHandler = { [weak self] results, _ in self?.discovered(results) }
         b.stateUpdateHandler = { [weak self, weak b] st in
             guard let self, let b, self.browser === b else { return }
@@ -383,7 +229,7 @@ final class LANSession: NetLink {
             case .ready:
                 self.main { $0.flag(.localNetwork, false) }
             case .waiting(let e):
-                if LANSession.isPolicyDenied(e) { self.main { $0.flag(.localNetwork, true) } }
+                if LANProtocol.isPolicyDenied(e) { self.main { $0.flag(.localNetwork, true) } }
             case .failed:
                 // Restart (e.g. after the network changed).
                 b.cancel()
@@ -396,12 +242,6 @@ final class LANSession: NetLink {
         }
         b.start(queue: q)
         browser = b
-    }
-
-    /// macOS said no to local network access.
-    private static func isPolicyDenied(_ e: NWError) -> Bool {
-        if case .dns(let code) = e { return code == -65570 }   // kDNSServiceErr_PolicyDenied
-        return false
     }
 
     /// Publish a new TXT record when what we'd advertise changed (the listener keeps running and keeps its port).
@@ -435,6 +275,7 @@ final class LANSession: NetLink {
     private func discovered(_ results: Set<NWBrowser.Result>) {
         var g: [String: DiscoveredGame] = [:], p: [String: DiscoveredPeer] = [:]
         var eps: [String: NWEndpoint] = [:]
+        var announced: [Invite] = []
         for r in results {
             guard case .service = r.endpoint, case .bonjour(let t) = r.metadata, let svc = t["i"], svc != instance else { continue }
             eps[svc] = r.endpoint
@@ -444,8 +285,12 @@ final class LANSession: NetLink {
             if t["h"] == "1" {
                 g[svc] = DiscoveredGame(service: svc, hostName: n, color: c, mode: GameMode(rawValue: t["m"] ?? "") ?? .freeRoam,
                                         world: t["w"] ?? "meadow", players: Int(t["p"] ?? "1") ?? 1, endpoint: r.endpoint, otherVersion: other)
+                if other == nil, LANProtocol.invited(in: t["iv"]).contains(instance) {
+                    announced.append(Invite(from: String(n.prefix(20)), color: c, service: svc))
+                }
             }
-            p[svc] = DiscoveredPeer(service: svc, name: n, color: c, inGame: t["g"] == "1", endpoint: r.endpoint, otherVersion: other)
+            p[svc] = DiscoveredPeer(service: svc, name: n, color: c, inGame: t["g"] == "1", endpoint: r.endpoint, otherVersion: other,
+                                    server: t["s"] == "1")
         }
         endpoints = eps
         let games = g.values.sorted { ($0.otherVersion == nil ? 0 : 1, $0.hostName) < ($1.otherVersion == nil ? 0 : 1, $1.hostName) }
@@ -454,8 +299,19 @@ final class LANSession: NetLink {
             s.games = games
             s.nearby = peers
             s.invites.removeAll { inv in !peers.contains { $0.service == inv.service } }
+            announced.forEach { s.show($0) }
             s.onChange?()
         }
+    }
+
+    /// An invite arrived (directly, or listed in the host's TXT record): offer it, once.
+    private func show(_ inv: Invite) {
+        guard role == .idle, !invites.contains(inv) else { return }
+        if let t = invitesShown[inv.service], Date().timeIntervalSince(t) < LANProtocol.inviteLife { return }
+        invitesShown[inv.service] = Date()
+        invites.append(inv)
+        onInvite?(inv)
+        onChange?()
     }
 
     // MARK: Heartbeat
@@ -478,6 +334,16 @@ final class LANSession: NetLink {
         }
         // Connections that never said hello (or an invite that was never sent).
         for c in pending.values where now - c.opened > 10 { c.close() }
+        // Invites lapse after a minute (and can be sent again).
+        let lapsed = invitedQ.filter { $0.value < now }.map(\.key)
+        if !lapsed.isEmpty {
+            for k in lapsed { invitedQ.removeValue(forKey: k) }
+            readvertise()
+            main { s in
+                lapsed.forEach { s.invited.remove($0) }
+                s.onChange?()
+            }
+        }
     }
 
     // MARK: Incoming connections (joins and invites)
@@ -493,12 +359,7 @@ final class LANSession: NetLink {
             case .hello(let h): self.pending.removeValue(forKey: key); self.admit(conn, h)
             case .invite(let from, let color, let service):
                 let inv = Invite(from: String(from.prefix(20)), color: color, service: service)
-                self.main { s in
-                    guard s.role == .idle, !s.invites.contains(inv) else { return }
-                    s.invites.append(inv)
-                    s.onInvite?(inv)
-                    s.onChange?()
-                }
+                self.main { $0.show(inv) }
                 conn.close()
             default: break
             }
@@ -589,6 +450,7 @@ final class LANSession: NetLink {
         role = .hosting
         status = "Hosting"
         chat = []
+        invited = []
         let me = PeerInfo(id: 1, name: name, color: color, bird: bird, fit: fit)
         lock.lock(); _localId = 1; box = NetInbox(); lock.unlock()
         q.async { [self] in
@@ -597,6 +459,7 @@ final class LANSession: NetLink {
             latest = [:]
             outbox = []
             banned = []
+            invitedQ = [:]
             lobbyQ = Lobby(hostName: me.name, players: [me], rules: rules, mode: mode, world: world, running: false)
             startRelay()
             pushLobby()
@@ -710,7 +573,7 @@ final class LANSession: NetLink {
     private func connect(_ g: DiscoveredGame, hello: Hello, deadline: Double) {
         // A Bonjour game may have moved (new address or interface): use the freshest endpoint.
         let ep = g.service.isEmpty ? g.endpoint : (endpoints[g.service] ?? g.endpoint)
-        let conn = Conn(NWConnection(to: ep, using: LANSession.params()))
+        let conn = Conn(NWConnection(to: ep, using: LANProtocol.parameters()))
         server = conn
         welcomed = false
         conn.onMessage = { [weak self, weak conn] w in
@@ -864,6 +727,7 @@ final class LANSession: NetLink {
                 clients.removeAll()
                 latest.removeAll()
                 outbox.removeAll()
+                invitedQ = [:]
                 lobbyQ = Lobby()
                 readvertise()
             }
@@ -872,6 +736,7 @@ final class LANSession: NetLink {
         let was = role
         role = .idle
         lobby = Lobby()
+        invited = []
         status = ""
         keepAwake(false)
         lock.lock(); _localId = 1; box = NetInbox(); lock.unlock()
@@ -884,11 +749,16 @@ final class LANSession: NetLink {
         invited.insert(p.service)
         onChange?()
         let msg = Wire.invite(from: name, color: color, service: instance)
-        q.async { [self] in sendInvite(msg, to: p.service, fallback: p.endpoint, tries: 3) }
+        let direct = !debugNoDirectInvites
+        q.async { [self] in
+            invitedQ[p.service] = uptime() + LANProtocol.inviteLife
+            readvertise()
+            if direct { sendInvite(msg, to: p.service, fallback: p.endpoint, tries: 3) }
+        }
     }
 
     private func sendInvite(_ msg: Wire, to service: String, fallback: NWEndpoint, tries: Int) {
-        let c = Conn(NWConnection(to: endpoints[service] ?? fallback, using: LANSession.params()))
+        let c = Conn(NWConnection(to: endpoints[service] ?? fallback, using: LANProtocol.parameters()))
         var sent = false
         c.onClose = { [weak self] in
             guard !sent, tries > 1 else { return }
@@ -1010,7 +880,7 @@ final class LANSession: NetLink {
     func refreshDiagnostics() {
         guard role != .offline else { return }
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let addrs = LANSession.localAddresses()
+            let addrs = LANProtocol.localAddresses()
             let blocked = LANSession.firewallBlocksUs()
             let managed = blocked && LANSession.firewallIsManaged()
             DispatchQueue.main.async {
@@ -1022,29 +892,6 @@ final class LANSession: NetLink {
                 if changed { self.onChange?() }
             }
         }
-    }
-
-    /// IPv4 addresses on active network interfaces (Wi-Fi / Ethernet), most likely first.
-    static func localAddresses() -> [String] {
-        var list: [(String, String)] = []
-        var ifa: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifa) == 0, let first = ifa else { return [] }
-        defer { freeifaddrs(ifa) }
-        var p: UnsafeMutablePointer<ifaddrs>? = first
-        while let cur = p {
-            defer { p = cur.pointee.ifa_next }
-            let flags = Int32(cur.pointee.ifa_flags)
-            guard let sa = cur.pointee.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET),
-                  flags & IFF_UP != 0, flags & IFF_RUNNING != 0, flags & IFF_LOOPBACK == 0 else { continue }
-            let ifName = String(cString: cur.pointee.ifa_name)
-            guard ifName.hasPrefix("en") || ifName.hasPrefix("bridge") else { continue }
-            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            guard getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 else { continue }
-            let ip = String(cString: host)
-            guard !ip.hasPrefix("169.254.") else { continue }
-            list.append((ifName, ip))
-        }
-        return list.sorted { $0.0 < $1.0 }.map(\.1)
     }
 
     /// True when the macOS firewall is on and blocks incoming connections to this app (or everything).
@@ -1093,9 +940,11 @@ final class LANSession: NetLink {
         if !hosting { lobby = Lobby() }
         let ep = NWEndpoint.hostPort(host: "127.0.0.1", port: 1)
         nearby = [DiscoveredPeer(service: "a", name: "Riley", color: 7, inGame: false, endpoint: ep),
-                  DiscoveredPeer(service: "b", name: "Jordan", color: 3, inGame: false, endpoint: ep)]
+                  DiscoveredPeer(service: "b", name: "Jordan", color: 3, inGame: false, endpoint: ep),
+                  DiscoveredPeer(service: "s", name: "Jamie", color: 4, inGame: true, endpoint: ep, server: true)]
         invited = ["b"]
         games = hosting ? [] : [DiscoveredGame(service: "g", hostName: "Alex", color: 5, mode: .pvp, world: "caves", players: 3, endpoint: ep),
+                                DiscoveredGame(service: "s", hostName: "Jamie", color: 4, mode: .ringRace, world: "volcano", players: 2, endpoint: ep),
                                 DiscoveredGame(service: "h", hostName: "Morgan", color: 6, mode: .freeRoam, world: "meadow", players: 1,
                                                endpoint: ep, otherVersion: "0.2")]
         invites = hosting ? [] : [Invite(from: "Sam", color: 2, service: "s")]
@@ -1109,108 +958,5 @@ final class LANSession: NetLink {
 
     private func main(_ f: @escaping (LANSession) -> Void) {
         DispatchQueue.main.async { [weak self] in if let self { f(self) } }
-    }
-}
-
-// MARK: - Match director (host only, main thread)
-
-/// Runs rounds for a LAN game: who's racing / fighting, finish times, knock-outs, and when it's over.
-final class MatchDirector {
-    private(set) var round = 0
-    private(set) var running = false
-    private var mode = GameMode.freeRoam
-    private var players: [PeerInfo] = []
-    private var finished: [Int: Double] = [:]
-    private var out: [Int] = []
-    private var kos: [Int: Int] = [:]
-    private var started = Date()
-    private var firstFinish: Date?
-    /// Latest state per player (race progress, lives, health) for standings.
-    var state: ((Int) -> NetState?)?
-
-    /// Start a round: everyone gets a grid slot.
-    func start(mode: GameMode, players: [PeerInfo]) -> MatchCommand {
-        round += 1
-        running = true
-        self.mode = mode
-        self.players = players
-        finished = [:]
-        out = []
-        kos = [:]
-        started = Date()
-        firstFinish = nil
-        var slots: [Int: Int] = [:]
-        for (i, p) in players.shuffled().enumerated() { slots[p.id] = i }
-        return .start(matchId: round, countdown: 3, slots: slots)
-    }
-
-    func stop() { running = false }
-
-    func handle(_ e: GameEvent) -> MatchCommand? {
-        guard running else { return nil }
-        switch e {
-        case .finished(let id, let time):
-            guard mode.isRace, finished[id] == nil, players.contains(where: { $0.id == id }) else { return nil }
-            finished[id] = time
-            if firstFinish == nil { firstFinish = Date() }
-        case .died(_, let killer):
-            if mode == .pvp && killer != 0 { kos[killer, default: 0] += 1 }
-            return nil
-        case .eliminated(let id):
-            guard mode == .pvp, !out.contains(id), players.contains(where: { $0.id == id }) else { return nil }
-            out.append(id)
-        default: return nil
-        }
-        return check()
-    }
-
-    func playerLeft(_ id: Int) -> MatchCommand? {
-        players.removeAll { $0.id == id }
-        return running ? check() : nil
-    }
-
-    /// Timeouts: 45 s after the first finisher, or 6 minutes in all.
-    func tick() -> MatchCommand? {
-        guard running else { return nil }
-        if let f = firstFinish, Date().timeIntervalSince(f) > 45 { return results() }
-        let limit = mode == .pvp ? Double(Game.fightLimit) + 3 : 360
-        if Date().timeIntervalSince(started) > limit { return results() }
-        return nil
-    }
-
-    private func check() -> MatchCommand? {
-        if mode.isRace {
-            return players.allSatisfy({ finished[$0.id] != nil }) ? results() : nil
-        }
-        let alive = players.filter { !out.contains($0.id) }
-        return alive.count <= 1 ? results() : nil
-    }
-
-    private func results() -> MatchCommand {
-        running = false
-        var st: [Standing] = []
-        if mode.isRace {
-            let done = players.filter { finished[$0.id] != nil }.sorted { finished[$0.id]! < finished[$1.id]! }
-            let dnf = players.filter { finished[$0.id] == nil }.sorted { (state?($0.id)?.progress ?? 0) > (state?($1.id)?.progress ?? 0) }
-            for (i, p) in (done + dnf).enumerated() {
-                st.append(Standing(id: p.id, name: p.name, color: p.color, place: i + 1, time: finished[p.id],
-                                   note: finished[p.id] == nil ? "Did not finish" : ""))
-            }
-        } else {
-            // Still in: most lives, then most health.
-            let alive = players.filter { !out.contains($0.id) }.sorted { a, b in
-                let sa = state?(a.id), sb = state?(b.id)
-                if (sa?.lives ?? 0) != (sb?.lives ?? 0) { return (sa?.lives ?? 0) > (sb?.lives ?? 0) }
-                return (sa?.hp ?? 0) > (sb?.hp ?? 0)
-            }
-            let order = alive.map(\.id) + out.reversed()
-            for (i, id) in order.enumerated() {
-                guard let p = players.first(where: { $0.id == id }) else { continue }
-                st.append(Standing(id: id, name: p.name, color: p.color, place: i + 1, knockouts: kos[id] ?? 0))
-            }
-        }
-        // Players who left mid-round don't get listed.
-        for (i, _) in st.enumerated() { st[i].place = i + 1 }
-        return .results(matchId: round, standings: st)
     }
 }

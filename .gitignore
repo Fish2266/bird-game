@@ -3,3 +3,5 @@
 dist/
 # Older standalone copy of the project
 BirdFlight/
+xcuserdata/
+*.xcuserstate

@@ -565,9 +565,17 @@ enum NetTest {
         // Quiet lobby: heartbeats keep everyone connected.
         RunLoop.main.run(until: Date().addingTimeInterval(LANSession.timeout + 2))
         wait("still connected after \(Int(LANSession.timeout + 2)) s with nothing to say") { guest.role == .joined && third.role == .joined && host.lobby.players.count == 3 }
-        // Invite
+        // Invite: listed in the host's TXT record alone (like a player whose firewall turns away the direct kind)…
+        host.debugNoDirectInvites = true
         if let p = host.nearby.first(where: { $0.name == "Invitee" }) { host.invite(p) }
-        wait("invitee gets an invite from Hosty") { invite?.from == "Hosty" }
+        wait("invitee gets an invite from Hosty through the TXT record alone") { invite?.from == "Hosty" }
+        host.debugNoDirectInvites = false
+        // …and sent directly, which is all a 0.3 game understands.
+        let old03 = DirectInviteCatcher(name: "Oldy", instance: "OLD00030")
+        wait("host sees a 0.3 game online") { host.nearby.contains { $0.name == "Oldy" } }
+        if let p = host.nearby.first(where: { $0.name == "Oldy" }) { host.invite(p) }
+        wait("the 0.3 game gets the direct invite") { old03.invites.contains("Hosty") }
+        old03.stop()
         if let inv = invite { other.accept(inv) }
         wait("invitee accepts and joins") { other.role == .joined && host.lobby.players.count == 4 }
         other.leave()
@@ -596,6 +604,257 @@ enum NetTest {
         guest.leave(); third.leave()
         oldHost?.cancel()
         v021Host?.cancel()
+        print(failures == 0 ? "ALL PASSED" : "\(failures) FAILED")
+    }
+}
+
+/// Test stand-in for Bird Game 0.3 on the network: advertises itself as a player and records direct invites
+/// (the only kind 0.3 understands).
+final class DirectInviteCatcher {
+    private(set) var invites: [String] = []
+    private let listener: NWListener?
+    private var conns: [Conn] = []
+
+    init(name: String, instance: String) {
+        var t = NWTXTRecord()
+        for (k, v) in ["n": name, "c": "4", "i": instance, "v": String(LANProtocol.version), "a": "0.3", "h": "0", "g": "0"] { t[k] = v }
+        listener = try? NWListener(using: LANProtocol.parameters())
+        listener?.service = NWListener.Service(name: "\(name) · \(instance)", type: LANProtocol.serviceType, domain: nil, txtRecord: t)
+        listener?.newConnectionHandler = { [weak self] nc in
+            let c = Conn(nc)
+            c.onMessage = { w in if case .invite(let from, _, _) = w { self?.invites.append(from) } }
+            self?.conns.append(c)
+            c.start(on: .main)
+        }
+        listener?.start(queue: .main)
+    }
+
+    func stop() {
+        listener?.cancel()
+        conns.forEach { $0.close() }
+    }
+}
+
+/// Test stand-in for a game joining straight over TCP on loopback (to try other versions and a full game).
+final class RawJoiner {
+    private(set) var reply: Wire?
+    private let conn: Conn
+
+    init(instance: String, version: Int = LANProtocol.version) {
+        conn = Conn(NWConnection(to: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: LANProtocol.port)!),
+                                 using: LANProtocol.parameters()))
+        conn.onMessage = { [weak self] w in if self?.reply == nil { self?.reply = w } }
+        conn.start(on: .main)
+        conn.send(.hello(Hello(name: "Raw", color: 0, bird: "gull", version: version, instance: instance)))
+    }
+
+    var welcomed: Bool { if case .welcome? = reply { return true }; return false }
+    var rejection: String? { if case .reject(let why)? = reply { return why }; return nil }
+    func close() { conn.close() }
+}
+
+enum ServerTest {
+    /// `--server-test`: Bird Server's engine (a host that doesn't play) and copies of the game in one process over real
+    /// Bonjour / TCP. Checks that games find and join it like a Mac host, its relay, rounds, chat, invites (TXT and
+    /// direct), removing players, other versions, a full game and stopping. Prints PASS/FAIL per step.
+    static func run() {
+        var failures = 0
+        func check(_ ok: Bool, _ what: String) { if !ok { failures += 1 }; print("\(ok ? "PASS" : "FAIL")  \(what)") }
+        func wait(_ what: String, _ timeout: Double = 10, _ cond: () -> Bool) {
+            let end = Date().addingTimeInterval(timeout)
+            while !cond() && Date() < end { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            check(cond(), what)
+        }
+        func results(_ list: [MatchCommand]) -> [Standing]? {
+            for m in list.reversed() { if case .results(_, let st) = m { return st } }
+            return nil
+        }
+
+        // The invite list in the TXT record.
+        check(LANProtocol.inviteList(["AAAA1111", "BBBB2222"]) == "AAAA1111,BBBB2222"
+              && LANProtocol.invited(in: "AAAA1111,BBBB2222") == ["AAAA1111", "BBBB2222"] && LANProtocol.invited(in: nil).isEmpty,
+              "invite list round trip")
+        let long = LANProtocol.inviteList((0..<40).map { String(format: "ID%06d", $0) })
+        check(long.count + 3 <= 250 && long.hasSuffix("ID000039") && !long.hasPrefix("ID000000"),
+              "a long invite list keeps the newest and fits in one TXT entry")
+
+        let server = LANServer()
+        server.name = "Phoney"
+        server.color = 6
+        var serverChat: [ChatLine] = []
+        server.onChat = { serverChat.append($0) }
+        let a = LANSession(); a.name = "Alice"; a.color = 1; a.bird = "falcon"
+        let b = LANSession(); b.name = "Bob"; b.color = 2; b.bird = "owl"
+        let c = LANSession(); c.name = "Cara"; c.color = 3
+        var aMatch: [MatchCommand] = [], bMatch: [MatchCommand] = []
+        a.onMatch = { aMatch.append($0) }
+        b.onMatch = { bMatch.append($0) }
+        var aEnded: String?, bEnded: String?
+        a.onEnded = { aEnded = $0 }
+        b.onEnded = { bEnded = $0 }
+        var cInvite: Invite?
+        c.onInvite = { cInvite = $0 }
+        let old03 = DirectInviteCatcher(name: "Olde", instance: "OLD00030")
+
+        server.start(mode: .ringRace, world: "volcano", rules: MatchRules(collisions: true, pvp: false, showLocation: true))
+        wait("server listens on the fixed port \(LANProtocol.port)") { server.port == LANProtocol.port }
+        a.goOnline(); b.goOnline(); c.goOnline()
+        wait("games find the server's game: Phoney's, Ring Race on Volcano, nobody in it yet") {
+            a.games.contains { $0.hostName == "Phoney" && $0.mode == .ringRace && $0.world == "volcano" && $0.players == 0 && $0.otherVersion == nil }
+        }
+        wait("the server shows up as a server, not a player to invite") { a.nearby.contains { $0.name == "Phoney" && $0.server && $0.inGame } }
+        wait("the server sees the games on the network to invite (not itself)") {
+            Set(server.nearby.map(\.name)).isSuperset(of: ["Alice", "Bob", "Cara", "Olde"]) && !server.nearby.contains { $0.id == server.instance }
+        }
+
+        // Joining
+        if let g = a.games.first(where: { $0.hostName == "Phoney" }) { a.join(g) }
+        wait("Alice joins with id 2; the lobby has only her (the server doesn't play)") {
+            a.role == .joined && a.localId == 2 && a.lobby.players.map(\.name) == ["Alice"] && a.lobby.hostName == "Phoney"
+        }
+        wait("the server lists Alice (falcon)") { server.players.map(\.name) == ["Alice"] && server.players.first?.bird == "falcon" }
+        b.join(address: "127.0.0.1:\(LANProtocol.port)")
+        wait("Bob joins by address with id 3") { b.role == .joined && b.localId == 3 && b.lobby.players.count == 2 && a.lobby.players.count == 2 }
+        wait("the advertised player count follows") { c.games.first { $0.hostName == "Phoney" }?.players == 2 }
+        wait("players in the game leave the invite list") { !server.nearby.contains { $0.name == "Alice" || $0.name == "Bob" } }
+        wait("the server's chat notes who joined") { server.chat.filter(\.system).map(\.text) == ["Alice joined", "Bob joined"] }
+
+        // Flight states: relayed once each, in order, never back to the sender.
+        func st(_ x: Float, _ t: Double, bird: String = "falcon", fit: String = "", flags: Int = NetState.alive) -> NetState {
+            NetState(id: 99, p: SIMD3(x, 50, 0), q: simd_quatf(angle: 0, axis: kUp).vector, v: SIMD3(0, 0, -20),
+                     w: SIMD4(0.1, 0.1, 0, 0), hp: 80, flags: flags, bird: bird, progress: 2.5, t: t, fit: fit)
+        }
+        _ = a.drain(); _ = b.drain()
+        for k in 0..<30 { a.send(state: st(Float(k), Double(k) / 30)) }
+        var atB: [NetState] = []
+        wait("Bob gets all 30 of Alice's states, once each, in order, as id 2") {
+            atB += b.drain().states
+            return atB.filter { $0.id == 2 }.map(\.p.x) == (0..<30).map(Float.init) && !atB.contains { $0.id == 99 }
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        check(a.drain().states.isEmpty, "Alice never gets her own states back")
+        wait("the server shows Alice flying (80 health, race progress)") {
+            server.players.first { $0.id == 2 }.map { $0.hp == 80 && $0.progress == 2.5 && $0.has(NetState.alive) } ?? false
+        }
+        b.send(state: st(0, 1, bird: "phoenix", fit: "h=crown,t=fire", flags: NetState.alive | NetState.paused))
+        wait("a new bird or outfit reaches everyone's lobby") { a.lobby.players.contains { $0.name == "Bob" && $0.bird == "phoenix" && $0.fit == "h=crown,t=fire" } }
+        wait("the server shows Bob paused") { server.players.first { $0.id == 3 }?.has(NetState.paused) == true }
+
+        // Events: relayed to the others, credited to the sender.
+        let shot = Shot(owner: 7, weapon: .missiles, attack: 7, origin: .zero, dir: SIMD3(0, 0, -1), ownerVel: .zero, target: 3)
+        a.send(event: .fire(shot))
+        var bEvents: [GameEvent] = []
+        wait("Bob sees Alice's attack, credited to Alice") {
+            bEvents += b.drain().events
+            return bEvents.contains { if case .fire(let s) = $0 { return s.owner == 2 }; return false }
+        }
+
+        // A race: start, finishes, results, back to warm-up.
+        server.startRound()
+        wait("everyone gets the round start, with a grid slot each") {
+            [aMatch, bMatch].allSatisfy { $0.contains { if case .start(_, _, let slots) = $0 { return Set(slots.keys) == [2, 3] }; return false } }
+        }
+        wait("the lobby says a round is under way") { a.lobby.running && server.lobby.running && server.roundStarted != nil }
+        a.send(event: .finished(id: 3, time: 88.25))
+        wait("the server credits a finish to whoever sent it") {
+            server.players.first { $0.id == 2 }?.finishTime == 88.25 && server.players.first { $0.id == 3 }?.finishTime == nil
+        }
+        b.send(event: .finished(id: 3, time: 91.5))
+        wait("when everyone has finished, everyone gets the results: Alice, then Bob") {
+            results(aMatch)?.map(\.name) == ["Alice", "Bob"] && results(bMatch)?.first?.time == 88.25
+        }
+        check(server.results?.map(\.name) == ["Alice", "Bob"] && !server.lobby.running, "the server shows the results and the round is over")
+        wait("everyone goes back to warm-up 14 s later", 20) { aMatch.contains { if case .warmup = $0 { return true }; return false } }
+        aMatch = []
+        server.startRound()
+        wait("a second round starts") { aMatch.contains { if case .start(2, _, _) = $0 { return true }; return false } }
+        server.endRound()
+        wait("End round sends the results straight away (nobody finished)") {
+            results(aMatch).map { $0.count == 2 && $0.allSatisfy { $0.time == nil && $0.note == "Did not finish" } } ?? false
+        }
+
+        // Mode, map and rules.
+        server.play(.pvp, on: "caves")
+        wait("everyone switches to PvP Fight on Glow Caves") { a.lobby.mode == .pvp && a.lobby.world == "caves" && b.lobby.mode == .pvp && b.lobby.world == "caves" }
+        wait("the advertised mode and map follow") { c.games.first { $0.hostName == "Phoney" }.map { $0.mode == .pvp && $0.world == "caves" } ?? false }
+        server.setRules(MatchRules(collisions: false, pvp: true, showLocation: false))
+        wait("everyone gets the new rules") { a.lobby.rules == MatchRules(collisions: false, pvp: true, showLocation: false) && !b.lobby.rules.collisions }
+        aMatch = []
+        server.startRound()
+        wait("a fight starts") { aMatch.contains { if case .start = $0 { return true }; return false } }
+        b.send(event: .died(victim: 3, killer: 2))
+        b.send(event: .eliminated(id: 3))
+        wait("the fight ends when one bird is left: Alice first with a knock-out, then Bob") {
+            results(aMatch).map { $0.map(\.name) == ["Alice", "Bob"] && $0[0].knockouts == 1 } ?? false
+        }
+
+        // Chat
+        server.say("  welcome\nall  ")
+        wait("everyone gets the server's message from Phoney, as one trimmed line") {
+            a.chat.contains { $0.id == 1 && $0.name == "Phoney" && $0.color == 6 && $0.text == "welcome all" } && b.chat.contains { $0.text == "welcome all" }
+        }
+        a.say("hi phone")
+        wait("a player's message reaches the server and the others") {
+            serverChat.contains { $0.name == "Alice" && $0.text == "hi phone" } && b.chat.contains { $0.name == "Alice" && $0.text == "hi phone" }
+        }
+        for k in 0..<12 { b.say("spam \(k)") }
+        RunLoop.main.run(until: Date().addingTimeInterval(1))
+        let spam = serverChat.filter { $0.name == "Bob" }.count
+        check(spam == 6, "spam guard lets 6 of 12 quick messages through (\(spam) did)")
+
+        // Invites: the TXT record alone reaches a game (like a Mac whose firewall turns away direct invites)…
+        server.debugNoDirectInvites = true
+        if let p = server.nearby.first(where: { $0.name == "Cara" }) { server.invite(p.id) }
+        wait("Cara gets an invite from Phoney through the TXT record alone") { cInvite?.from == "Phoney" && cInvite?.color == 6 }
+        check(server.nearby.first { $0.name == "Cara" }?.invited == true, "the invite list shows Cara as invited")
+        if let inv = cInvite { c.accept(inv) }
+        wait("Cara accepts and joins") { c.role == .joined && server.players.count == 3 }
+        // …and a 0.3 game gets the direct kind.
+        server.debugNoDirectInvites = false
+        if let p = server.nearby.first(where: { $0.name == "Olde" }) { server.invite(p.id) }
+        wait("a 0.3 game gets the direct invite") { old03.invites.contains("Phoney") }
+
+        // Heartbeats keep a quiet game together; a player who goes silent is dropped.
+        RunLoop.main.run(until: Date().addingTimeInterval(LANProtocol.timeout + 2))
+        wait("still connected after \(Int(LANProtocol.timeout + 2)) s with nothing to say") {
+            [a, b, c].allSatisfy { $0.role == .joined } && server.players.count == 3
+        }
+        c.debugGoSilent()
+        let silentAt = Date()
+        wait("the server drops a player who went silent", LANProtocol.timeout + 5) { server.players.count == 2 }
+        print(String(format: "      dropped after %.1f s", Date().timeIntervalSince(silentAt)))
+        wait("the chat notes that Cara left") { server.chat.last?.text == "Cara left" }
+
+        // Removing a player, and letting them back.
+        server.kick(3)
+        wait("removed Bob is told and leaves") { b.role == .idle && bEnded == "The host removed you from the game." }
+        wait("the server lists Bob under removed players") { server.removed.map(\.name) == ["Bob"] && server.players.count == 1 }
+        if let g = b.games.first(where: { $0.hostName == "Phoney" }) { b.join(g) }
+        wait("a removed player can't rejoin") { b.role == .idle && b.status.contains("removed") }
+        if let r = server.removed.first { server.allowBack(r.id) }
+        wait("allowing Bob back empties the list") { server.removed.isEmpty }
+        if let g = b.games.first(where: { $0.hostName == "Phoney" }) { b.join(g) }
+        wait("once allowed back, Bob can join again") { b.role == .joined && server.players.count == 2 }
+
+        // Other versions and a full game.
+        let wrong = RawJoiner(instance: "RAW00004", version: LANProtocol.version - 1)
+        wait("a game on another LAN version is turned away") { wrong.rejection?.contains("same version") == true }
+        var raws: [RawJoiner] = []
+        for k in 0..<6 { raws.append(RawJoiner(instance: "RAW0010\(k)")) }
+        wait("the server takes \(LANProtocol.maxPlayers) players") { raws.allSatisfy(\.welcomed) && server.players.count == LANProtocol.maxPlayers }
+        let ninth = RawJoiner(instance: "RAW00200")
+        wait("a ninth player is told the game is full") { ninth.rejection == "That game is full." }
+        raws.forEach { $0.close() }
+        wrong.close()
+        ninth.close()
+        wait("players who disconnect leave the lobby") { server.players.count == 2 && a.lobby.players.count == 2 }
+
+        // Stopping: everyone is told, and the game leaves the network.
+        server.stop()
+        wait("when the server stops, everyone is told the game is over") { a.role == .idle && aEnded == "The host ended the game." && b.role == .idle }
+        wait("the game disappears from the network") { !a.games.contains { $0.hostName == "Phoney" } }
+        old03.stop()
+        a.leave(); b.leave()
         print(failures == 0 ? "ALL PASSED" : "\(failures) FAILED")
     }
 }
