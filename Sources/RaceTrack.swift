@@ -34,7 +34,8 @@ final class RaceTrack {
 
     /// Gold, silver and bronze target times (seconds) for this course.
     var medalTimes: [Double] {
-        let pace: Float = caves ? 0.8 : 1
+        // Tunnels and street corners are slower going than open sky.
+        let pace: Float = caves ? 0.8 : (world == .city ? 0.86 : 1)
         return [24, 20.5, 17].map { Double(length / ($0 * pace)).rounded() }
     }
     private var ribbonMat: SCNMaterial?
@@ -59,6 +60,8 @@ final class RaceTrack {
         let length: Float = mode == .ringRace ? 2700 : 3000
         if let cave = terrain as? CaveTerrain {
             path = RaceTrack.cavePath(cave, from: spawn.0, yaw: spawn.1, length: length)
+        } else if world == .city {
+            path = CityRace.path(from: spawn.0, yaw: spawn.1, length: length, rng: &rng)
         } else {
             path = RaceTrack.openPath(world: world, from: spawn.0, yaw: spawn.1, length: length, rng: &rng,
                                       clearance: mode == .ringRace ? 26 : 20)
@@ -69,6 +72,7 @@ final class RaceTrack {
         // 2. Obstacles go between the gates; barns pull the path down before anything is placed on it.
         var plans = RaceTrack.planObstacles(world: world, mode: mode, gates: RaceTrack.gatePositions(mode, arc.last ?? 0), rng: &rng)
         if world == .dogfight { dipForBarns(&plans) }
+        if world == .city { midBlock(&plans) }
 
         let startTangent = tangent(at: 12)
         start = path[0]
@@ -354,6 +358,10 @@ final class RaceTrack {
 
     /// Opening radius at arc position `s`: fits the tunnel in the caves.
     private func openingRadius(at s: Float, terrain: WorldTerrain, open: Float) -> Float {
+        if world == .city {
+            // Between the buildings: a gate as wide as the street allows.
+            return min(open, CityRace.streetHalfWidth(at: point(atArc: s)) - 1.6)
+        }
         guard let cave = terrain as? CaveTerrain else { return open }
         let p = point(atArc: s)
         let sm = cave.sample(p.x, p.z)
@@ -478,7 +486,7 @@ final class RaceTrack {
 
     private func buildStartArch() {
         let t = tangent(at: 0)
-        let r: Float = caves ? max(4, (gates.first?.radius ?? 8) * 0.9) : 14
+        let r: Float = caves ? max(4, (gates.first?.radius ?? 8) * 0.9) : (world == .city ? min(14, CityRace.streetHalfWidth(at: point(atArc: 6)) - 1.2) : 14)
         // Just ahead of the grid so everyone flies through it at GO.
         let (node, _) = RaceTrack.arch(center: point(atArc: 6), tangent: t, halfWidth: r, finish: false, start: true)
         root.addChildNode(node)
@@ -486,7 +494,12 @@ final class RaceTrack {
 
     // MARK: Obstacles
 
-    private enum Kind { case stacks, turbine, arch, lava, spires, crusher, crystals, barn, farmMill, balloons, silos }
+    private enum Kind {
+        case stacks, turbine, arch, lava, spires, crusher, crystals, barn, farmMill, balloons, silos
+        case wrecking, skywalk, parade, hoverHeli, trainCross
+        case ribs, fallen, steam, pteroOrbit
+        case sandArch, hoodoos, cartBridge, lowTrestle, windpump
+    }
 
     private struct Plan { var kind: Kind; var s: Float }
 
@@ -497,6 +510,10 @@ final class RaceTrack {
         case .volcano: cycle = [.lava, .spires, .lava, .spires]
         case .caves: cycle = [.crusher, .crystals, .crusher, .crystals]
         case .dogfight: cycle = [.barn, .farmMill, .balloons, .silos, .farmMill, .balloons]
+        case .city: cycle = [.wrecking, .skywalk, .parade, .hoverHeli, .trainCross]
+        case .dino: cycle = [.ribs, .steam, .fallen, .pteroOrbit]
+        case .west: cycle = [.sandArch, .hoodoos, .cartBridge, .windpump, .lowTrestle]
+        case .finale: cycle = [.arch, .stacks, .arch]
         }
         var plans: [Plan] = []
         var k = world == .dogfight ? 0 : Int(rng.float(0, Float(cycle.count)))
@@ -546,6 +563,34 @@ final class RaceTrack {
         for i in 1..<path.count { arc.append(arc[i - 1] + simd_distance(path[i - 1], path[i])) }
     }
 
+    /// City obstacles belong in the middle of a block on a straight stretch, not in an intersection or a turn.
+    private func midBlock(_ plans: inout [Plan]) {
+        let G = CityLayout.pitch
+        var keep: [Plan] = []
+        for k in plans.indices {
+            var best: Float?
+            var bestD: Float = .infinity
+            for ds in stride(from: Float(-90), through: 90, by: 3) {
+                let s = plans[k].s + ds
+                guard s > 40, s < length - 40 else { continue }
+                let t = tangent(at: s), t2 = tangent(at: s - 20), t3 = tangent(at: s + 20)
+                let straight = min(max(abs(t.x), abs(t.z)), max(abs(t2.x), abs(t2.z)), max(abs(t3.x), abs(t3.z)))
+                guard straight > 0.995 else { continue }
+                let p = point(atArc: s)
+                let along = abs(t.x) > abs(t.z) ? p.x : p.z
+                var m = along.truncatingRemainder(dividingBy: G)
+                if m < 0 { m += G }
+                guard m > 38 && m < 82 else { continue }
+                // Not too close to its neighbours.
+                if keep.contains(where: { abs($0.s - s) < 70 }) { continue }
+                if abs(ds) < bestD { bestD = abs(ds); best = s }
+            }
+            // No good spot nearby: leave this one out rather than block an intersection.
+            if let b = best { plans[k].s = b; keep.append(plans[k]) }
+        }
+        plans = keep
+    }
+
     private func buildObstacles(_ plans: [Plan], terrain: WorldTerrain) {
         for plan in plans {
             let c = point(atArc: plan.s)
@@ -566,6 +611,20 @@ final class RaceTrack {
             case .crusher: o = Crushers(frame: f, terrain: terrain)
             case .barn: o = Barn(frame: f)
             case .balloons: o = Balloons(frame: f, pathY: c.y)
+            case .wrecking: o = WreckingBall(frame: f, halfWidth: CityRace.streetHalfWidth(at: c), phase: plan.s * 0.37)
+            case .skywalk: o = StreetSkybridge(frame: f, halfWidth: CityRace.streetHalfWidth(at: c))
+            case .parade: o = ParadeBalloon(frame: f, halfWidth: CityRace.streetHalfWidth(at: c))
+            case .hoverHeli: o = HoverHeli(frame: f, halfWidth: CityRace.streetHalfWidth(at: c), side: Int(plan.s) % 2 == 0 ? 1 : -1)
+            case .trainCross: o = TrainCrossing(frame: f, halfWidth: CityRace.streetHalfWidth(at: c), phase: plan.s * 0.11)
+            case .ribs: o = FossilRibs(frame: f)
+            case .fallen: o = FallenGiant(frame: f)
+            case .steam: o = SteamGeysers(frame: f)
+            case .pteroOrbit: o = PteroOrbit(frame: f, phase: plan.s * 0.07)
+            case .sandArch: o = SandArch(frame: f)
+            case .hoodoos: o = Hoodoos(frame: f)
+            case .cartBridge: o = CartBridge(frame: f, phase: plan.s * 0.13)
+            case .lowTrestle: o = LowTrestle(frame: f)
+            case .windpump: o = Windpump(frame: f)
             }
             obstacles.append(o)
             root.addChildNode(o.node)
@@ -640,6 +699,10 @@ final class RaceTrack {
         case .caves: tint = SIMD3(0.4, 1, 0.9)
         case .dogfight: tint = SIMD3(1, 0.95, 0.55)
         case .meadow: tint = SIMD3(0.55, 0.9, 1)
+        case .city: tint = SIMD3(1, 0.85, 0.3)
+        case .dino: tint = SIMD3(0.6, 1, 0.45)
+        case .west: tint = SIMD3(1, 0.75, 0.4)
+        case .finale: tint = SIMD3(1, 0.85, 0.45)
         }
         return makeImage(width: 64, height: 64) { x, y in
             let u = (Float(x) + 0.5) / 64, v = (Float(y) + 0.5) / 64
@@ -657,6 +720,15 @@ final class RaceTrack {
 extension WorldID {
     /// Stable across launches (unlike `hashValue`), for seeding.
     var hashValueStable: Int {
-        switch self { case .meadow: return 1; case .volcano: return 2; case .caves: return 3; case .dogfight: return 4 }
+        switch self {
+        case .meadow: return 1
+        case .volcano: return 2
+        case .caves: return 3
+        case .dogfight: return 4
+        case .city: return 5
+        case .dino: return 6
+        case .west: return 7
+        case .finale: return 8
+        }
     }
 }

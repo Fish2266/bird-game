@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import SceneKit
 
 let args = CommandLine.arguments
 if let i = args.firstIndex(of: "--render-test") {
@@ -56,6 +57,16 @@ if let i = args.firstIndex(of: "--menu-snapshot") {
     menu.hideSettings()
     menu.debugShowWorld("volcano")
     snap(".worlds.png")
+    _ = p.claim(WorldReward(id: "west.saloon", title: "", coins: 50, once: true), world: "west")
+    _ = p.claim(WorldReward(id: "west.mine", title: "", coins: 50, once: true), world: "west")
+    menu.debugShowWorld("west")
+    snap(".worlds-west.png")
+    menu.debugShowWorld("dino")
+    snap(".worlds-dino.png")
+    menu.debugShowWorld("finale")
+    snap(".worlds-finale.png")
+    menu.debugShowPlayMap(.finale)
+    snap(".play-finale.png")
     menu.setPlaying(mode: .ringRace, world: .meadow)
     menu.debugShowTab(.play)
     snap(".play.png")
@@ -116,6 +127,21 @@ if let i = args.firstIndex(of: "--menu-snapshot") {
     p.checkGoals()
     menu.debugShowTab(.goals)
     snap(".goals.png")
+    menu.debugScrollGoalsToEnd()
+    snap(".goals-end.png")
+    // 1.0: every goal done — The Finale opens; then after it, the jetpack's row in Settings.
+    p.debugCompleteGoals(GoalCatalog.required.map(\.id))
+    menu.debugShowTab(.goals)
+    snap(".goals-done.png")
+    menu.debugShowWorld("finale")
+    snap(".worlds-finale-open.png")
+    p.awardCrown(); p.finishFinale()
+    menu.setSettings(SettingsCard.Values(sound: true, help: false, chat: true, fps: true, autoUpdate: true, hudOpacity: 1,
+                                         cameras: [("a", "FaceTime HD Camera")], currentCamera: "a", preview: true, graphics: nil,
+                                         automaticGraphics: .high, vsync: true, screenMaxFPS: 120, jetpack: true))
+    menu.showSettings()
+    snap(".settings-jetpack.png")
+    menu.hideSettings()
     let fake = LANSession()
     fake.name = "Connor"; fake.color = 0
     let menu2 = PauseMenuView(progress: p, lan: fake)
@@ -171,6 +197,75 @@ if let i = args.firstIndex(of: "--menu-snapshot") {
     }
     card.removeFromSuperview()
     UserDefaults.standard.removeObject(forKey: key)
+    exit(0)
+}
+
+if args.contains("--city-bridges") {
+    // Where the river's road bridges are, from the spawn.
+    var best = SIMD2<Float>(0, 0), bestScore: Float = -1e9
+    for j in -14...14 where CityLayout.lineZ(j).avenue {
+        for i in -14...14 where CityLayout.lineX(i).avenue && !CityLayout.lineX(i).el && CityLayout.nodeExists(i, j) {
+            let p = CityLayout.nodePosition(i, j)
+            let score = CityLayout.district(p.x, p.y) * 2 - simd_length(p) * 0.0004
+            if score > bestScore { bestScore = score; best = p }
+        }
+    }
+    let sp = SIMD3(best.x, 0, best.y)
+    var found: [(Float, SIMD2<Float>, Bool)] = []
+    for j in -60...60 { for i in -60...60 { for ax in [true, false] {
+        if let e = CityLayout.edge(alongX: ax, i, j), let b = e.bridge {
+            let a = CityLayout.nodePosition(i, j)
+            let m = a + (ax ? SIMD2<Float>(1, 0) : SIMD2<Float>(0, 1)) * ((b.s0 + b.s1) / 2)
+            found.append((simd_distance(m, SIMD2(sp.x, sp.z)), m, ax))
+        }
+    } } }
+    found.sort { $0.0 < $1.0 }
+    print("spawn \(sp)  bridges: \(found.count)  river from spawn: \(CityLayout.riverDistance(sp.x, sp.z)) m")
+    for f in found.prefix(6) { print(String(format: "  %.0f m away at (%.0f, %.0f)", f.0, f.1.x, f.1.y)) }
+    exit(0)
+}
+
+if let i = args.firstIndex(of: "--title-snapshot") {
+    // The title screen over a stand-in sky, for checking its layout offscreen.
+    let root = NSView(frame: NSRect(x: 0, y: 0, width: 1440, height: 900))
+    root.wantsLayer = true
+    root.layer?.backgroundColor = NSColor(srgbRed: 0.45, green: 0.62, blue: 0.86, alpha: 1).cgColor
+    if let s = args.firstIndex(of: "--scene"), s + 1 < args.count, let w = WorldID(rawValue: args[s + 1]) {
+        // `--scene <world>`: the real thing behind it — the bird flying itself, the camera drifting round, a while in.
+        let sp = Catalog.species("sparrow")
+        let g = Game(controls: SharedControls(), world: w, species: sp, points: sp.base, terrainRadius: 3)
+        g.synchronousTerrain = true
+        g.attract = true
+        let r = SCNRenderer(device: MTLCreateSystemDefaultDevice(), options: nil)
+        r.scene = g.scene
+        r.pointOfView = g.cameraNode
+        var time = 0.0
+        let seconds = Double(ProcessInfo.processInfo.environment["TITLE_SECONDS"] ?? "") ?? 9
+        while time < seconds {
+            g.update(time: time)
+            time += 1.0 / 60
+            RunLoop.main.run(until: Date())
+        }
+        let img = r.snapshot(atTime: time, with: CGSize(width: 1440, height: 900), antialiasingMode: .multisampling4X)
+        let bg = NSImageView(frame: root.bounds)
+        bg.image = img
+        bg.imageScaling = .scaleAxesIndependently
+        root.addSubview(bg)
+    }
+    let t = TitleScreen(frame: root.bounds)
+    t.coins = 4321
+    t.finaleOpen = args.contains("--finale-open")
+    t.crowned = args.contains("--crowned")
+    t.calibration = 0.4
+    root.addSubview(t)
+    let win = NSWindow(contentRect: root.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+    win.contentView = root
+    root.layoutSubtreeIfNeeded()
+    RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+    if let rep = root.bitmapImageRepForCachingDisplay(in: root.bounds) {
+        root.cacheDisplay(in: root.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: i + 1 < args.count ? args[i + 1] : "title.png"))
+    }
     exit(0)
 }
 
@@ -379,7 +474,8 @@ if args.contains("--uncapped-test") {
 
 if args.contains("--frame-test") {
     // The Settings card's "Test max frame rate", on a freshly flown Home Isles scene at a Retina window's size.
-    let g = Game(controls: SharedControls(), world: .meadow, terrainRadius: 5)
+    let frameWorld = ProcessInfo.processInfo.environment["FRAME_WORLD"].flatMap(WorldID.init(rawValue:)) ?? .meadow
+    let g = Game(controls: SharedControls(), world: frameWorld, terrainRadius: 5)
     g.synchronousTerrain = true
     for k in 0..<90 { g.update(time: Double(k) / 60) }
     let device = MTLCreateSystemDefaultDevice()!
@@ -398,6 +494,26 @@ if let i = args.firstIndex(of: "--soak-test") {
 
 if let i = args.firstIndex(of: "--obstacle-shots") {
     ObstacleShots.run(dir: i + 1 < args.count ? args[i + 1] : "obstacles")
+    exit(0)
+}
+
+if args.contains("--subway-test") { WorldTests.subway() }
+if args.contains("--dino-test") { WorldTests.dino() }
+if args.contains("--west-test") { WorldTests.west() }
+if let i = args.firstIndex(of: "--finale-test") { FinaleTests.cutscene(dir: i + 1 < args.count ? args[i + 1] : "finale") }
+if args.contains("--jetpack-test") { FinaleTests.jetpack() }
+if args.contains("--clap-test") { FinaleTests.clap() }
+if args.contains("--finale-goals-test") { FinaleTests.goals() }
+if let i = args.firstIndex(of: "--race-trace") {
+    WorldTests.raceTrace(WorldID(rawValue: i + 1 < args.count ? args[i + 1] : "dogfight") ?? .dogfight,
+                         i + 2 < args.count && args[i + 2] == "ringRace" ? .ringRace : .speedRace)
+}
+if let i = args.firstIndex(of: "--dust-test") { WorldTests.dust(i + 1 < args.count ? args[i + 1] : "dust") }
+if let i = args.firstIndex(of: "--mem-test") { WorldTests.memory(WorldID(rawValue: i + 1 < args.count ? args[i + 1] : "dino") ?? .dino) }
+
+if let i = args.firstIndex(of: "--world-tour") {
+    WorldTour.run(dir: i + 1 < args.count ? args[i + 1] : "tour", world: i + 2 < args.count ? WorldID(rawValue: args[i + 2]) ?? .city : .city,
+                  only: i + 3 < args.count ? args[i + 3] : nil)
     exit(0)
 }
 

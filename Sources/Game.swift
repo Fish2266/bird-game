@@ -5,6 +5,8 @@ struct KeyInput {
     var left = false, right = false, up = false, down = false, flap = false, tuck = false
     /// Attack key (Return / E); set on key down, consumed by the game.
     var attack = false
+    /// Jetpack key (B): lights it or puts it out; consumed by the game.
+    var jet = false
     var lastUsed: Double = -100
     var any: Bool { left || right || up || down || flap || tuck }
 }
@@ -23,6 +25,10 @@ enum MatchPhase: Equatable { case warmup, countdown, running, done }
 
 struct HUDStats {
     var speedKmh: Float = 0
+    /// The jetpack: on your back, burning; and how fast against the speed of sound.
+    var jetEquipped = false
+    var jetOn = false
+    var mach: Float = 0
     var altitude: Float = 0
     var agl: Float = 0
     var score = 0
@@ -146,6 +152,10 @@ final class Game {
     var onLocalEvent: ((GameEvent) -> Void)?
     /// Main queue: this player knocked someone out (for coins).
     var onKnockout: ((String) -> Void)?
+    /// Main queue: the world paid out (a token, a discovery).
+    var onReward: ((WorldReward) -> Void)?
+    /// How far underground the scene is lit for (eased).
+    private var undergroundS: Float = 0
     /// Main queue, every few seconds: meters flown and the top speed (km/h) since the last report, counted only
     /// while the player is flying the bird (not the idle autopilot).
     var onFlight: ((Double, Double) -> Void)?
@@ -264,6 +274,26 @@ final class Game {
     var practice: PracticeTargets?
     /// Tutorial: free-roam rings can be switched off until they're introduced.
     var ringsEnabled = true
+    /// The jetpack (yours once The Finale is done): on your back, and burning.
+    var jetEquipped = false {
+        didSet { if jetEquipped != oldValue { enqueue { g in g.bird.setJetpack(g.jetEquipped); if !g.jetEquipped { g.jetOn = false } } } }
+    }
+    private(set) var jetOn = false
+    private var lastClapCount = -1
+    private var machShown = 0
+    /// The jetpack went on or off (for a word on the HUD).
+    var onJet: ((Bool) -> Void)?
+    /// The Finale's cutscene while it plays, what its overlay shows, and its moments (main thread).
+    private(set) var cutscene: FinaleCutscene?
+    private var _cutsceneOverlay: FinaleCutscene.Overlay?
+    var cutsceneOverlay: FinaleCutscene.Overlay? { statsLock.lock(); defer { statsLock.unlock() }; return _cutsceneOverlay }
+    var onCrowned: (() -> Void)?
+    var onJetpackGiven: (() -> Void)?
+    var onCutsceneDone: (() -> Void)?
+    /// After the cutscene the jetpack burns on its own for a moment, then goes out.
+    private var jetAutoOff: Float = 0
+    /// The title screen is up: the bird flies itself and the camera drifts round it (and the jetpack stays out).
+    var attract = false { didSet { if attract { enqueue { g in g.jetOn = false } } } }
     /// Test hook: overrides the player's input (used by the offscreen tests to fly courses).
     var debugSteer: ((Game) -> FlightInput?)?
     /// Test hook: combat events (hits taken, rams) as text.
@@ -289,10 +319,22 @@ final class Game {
         case .dogfight:
             visuals = .dogfight; provider = FarmTerrain()
             runtime = DogfightRuntime()
+        case .city:
+            visuals = .city
+            let t = CityTerrain(); provider = t; runtime = CityRuntime(terrain: t)
+        case .dino:
+            visuals = .dino
+            let t = DinoTerrain(); provider = t; runtime = DinoRuntime(terrain: t)
+        case .west:
+            visuals = .west
+            let t = WestTerrain(); provider = t; runtime = WestRuntime(terrain: t)
+        case .finale:
+            visuals = .finale
+            let t = FinaleTerrain(); provider = t; runtime = FinaleRuntime(terrain: t)
         }
         TerrainShape.active = provider
         terrain = TerrainManager(terrain: provider, radius: terrainRadius.map { min($0, provider.radius) })
-        water = visuals.surface == .ocean ? Water() : nil
+        water = visuals.surface == .ocean || visuals.surface == .river ? Water(color: visuals.waterColor) : nil
         lava = visuals.surface == .lava ? LavaSurface() : nil
         clouds = CloudField(count: visuals.cloudCount, heights: visuals.cloudHeight, tint: visuals.cloudTint)
         flock = Flock(count: mode == .freeRoam ? visuals.flockCount : 0)
@@ -408,8 +450,17 @@ final class Game {
         var (start, yaw) = spawn
         if multiplayer && slot > 0 {
             let side = SIMD3<Float>(cos(yaw), 0, -sin(yaw))
-            let lateral = Float((slot + 1) / 2) * (slot % 2 == 0 ? 1 : -1) * (custom && worldID == .caves ? 2.5 : 9)
-            start += side * lateral + SIMD3(0, worldID == .caves ? 0 : Float(slot % 3) * 3, 0)
+            if worldID == .city {
+                // Lined up down the avenue rather than spread into the buildings.
+                let back = SIMD3<Float>(sin(yaw), 0, cos(yaw))
+                let row: Float = Float(slot / 2) * 9, lateral: Float = slot % 2 == 0 ? 4 : -4, up: Float = Float(slot % 3) * 2.5
+                start += back * row
+                start += side * lateral
+                start.y += up
+            } else {
+                let lateral = Float((slot + 1) / 2) * (slot % 2 == 0 ? 1 : -1) * (custom && worldID == .caves ? 2.5 : 9)
+                start += side * lateral + SIMD3(0, worldID == .caves ? 0 : Float(slot % 3) * 3, 0)
+            }
         }
         place(at: start, yaw: yaw)
         if custom { flight.speed = 14 }
@@ -441,6 +492,11 @@ final class Game {
         let frameDt = Float(clamp(time - lastTime, 0, 0.1))
         lastTime = time
         applyPendingSpecies()
+        if let cs = cutscene, let rt = runtime as? FinaleRuntime {
+            elapsed += frameDt
+            updateCutscene(cs, rt, frameDt)
+            return
+        }
         if paused {
             if multiplayer {
                 tickNetwork(dt: frameDt, now: time)
@@ -464,8 +520,16 @@ final class Game {
         let c = controls.control
         let now = CACurrentMediaTime()
         if keys.any { keys.lastUsed = now }
-        let keyboard = now - keys.lastUsed < 1.5
-        let tracking = c.tracking && c.ready && !keyboard
+        // The jetpack: B, or a clap (and after the cutscene it goes out by itself in a moment).
+        if keys.jet { keys.jet = false; toggleJet() }
+        if jetAutoOff > 0 {
+            jetAutoOff -= frameDt
+            if jetAutoOff <= 0 && jetOn { toggleJet() }
+        }
+        if lastClapCount < 0 { lastClapCount = c.clapCount }
+        if c.clapCount != lastClapCount { lastClapCount = c.clapCount; if c.tracking { toggleJet() } }
+        let keyboard = now - keys.lastUsed < 1.5 && !attract
+        let tracking = c.tracking && c.ready && !keyboard && !attract
 
         // Build target input.
         var target = FlightInput()
@@ -516,7 +580,7 @@ final class Game {
                 let e: Float = flapNeed > 0 ? 0.2 + 0.7 * sin(idlePhase) : 0.05 + 0.04 * sin(idlePhase)
                 wingL = WingPose(elevation: e + steer.roll * 0.3, bend: 0); wingR = WingPose(elevation: e - steer.roll * 0.3, bend: 0)
             } else {
-            let ground = TerrainShape.ground(flight.pos.x, flight.pos.z)
+            let ground = TerrainShape.collisionGround(flight.pos.x, flight.pos.z, flight.pos.y)
             let ahead = flight.pos + flight.forward * 120
             let groundAhead = TerrainShape.ground(ahead.x, ahead.z)
             autopilotAlt = max(autopilotAlt, max(ground, groundAhead) + 70)
@@ -545,6 +609,9 @@ final class Game {
         var impact: Float = 0
         var hitWater = false
         let frozen = phase == .countdown || isKnockedOut
+        let wasJet = flight.jet
+        flight.jet = jetOn && jetEquipped && !frozen
+        if flight.jet && !wasJet { sound?.jetIgnite(); shake = min(1, shake + 0.25) }
         if frozen {
             holdStill(frameDt)
         } else {
@@ -570,6 +637,16 @@ final class Game {
         }
 
         // World hazards: knockback, lost streak, lost coins (coins only in free roam).
+        runtime?.setCamera(cameraNode.simdPosition)
+        if let runtime, let cb = onNotice {
+            for n in runtime.drainNotices() { DispatchQueue.main.async { cb(n) } }
+        }
+        if let runtime {
+            shake = min(1, shake + runtime.drainShake())
+            let rewards = runtime.drainRewards()
+            if !rewards.isEmpty, let cb = onReward { for r in rewards { DispatchQueue.main.async { cb(r) } } }
+            applyUnderground(runtime.underground, frameDt)
+        }
         if let runtime {
             for hit in runtime.update(dt: frameDt, time: elapsed, flight: flight, sound: sound) where !frozen {
                 if mode == .freeRoam {
@@ -597,7 +674,9 @@ final class Game {
         bird.node.simdPosition = flight.pos
         bird.node.simdOrientation = flight.orientation
         bird.pose(left: wingL, right: wingR, fold: fold, pitchIn: input.pitch, rollIn: input.roll, dt: frameDt)
-        bird.tick(dt: frameDt, speed: frozen ? 0 : flight.speed, camera: cameraNode.simdPosition, emitting: !frozen && !bird.node.isHidden)
+        bird.tick(dt: frameDt, speed: frozen ? 0 : min(flight.speed, 120), camera: cameraNode.simdPosition, emitting: !frozen && !bird.node.isHidden)
+        bird.jet(throttle: flight.jet ? 1 : 0, time: elapsed, speed: flight.speed)
+        jetEffects(frameDt)
 
         // Distance and top speed (goals), only while someone is actually flying.
         if !frozen && !autopilot && (tracking || keyboard) && debugSteer == nil {
@@ -634,17 +713,21 @@ final class Game {
         lava?.follow(camPos, time: elapsed)
         clouds.update(center: focus)
         moteEmitter.simdPosition = flight.pos + flight.forward * 30
-        motes.birthRate = CGFloat(150 + flight.speed * 18)
+        motes.birthRate = CGFloat(150 + min(flight.speed, 120) * 18)
 
-        let agl = flight.pos.y - TerrainShape.ground(flight.pos.x, flight.pos.z)
-        sound?.setFlight(speed: frozen ? 0 : flight.speed, tuck: input.tuck, stall: frozen ? 0 : flight.stalled, roll: flight.roll,
+        let agl = flight.pos.y - TerrainShape.collisionGround(flight.pos.x, flight.pos.z, flight.pos.y)
+        sound?.setFlight(speed: frozen ? 0 : min(flight.speed, 140), tuck: input.tuck, stall: frozen ? 0 : flight.stalled, roll: flight.roll,
                          ground: smoothstep(28, 2, agl))
+        sound?.setJet(gain: flight.jet ? min(1, 0.65 + flight.jetBurn * 0.05) : 0, speed: flight.speed)
         if multiplayer { publishState(dt: frameDt, now: time) }
 
         // Publish HUD stats.
-        let ground = TerrainShape.ground(flight.pos.x, flight.pos.z)
+        let ground = TerrainShape.collisionGround(flight.pos.x, flight.pos.z, flight.pos.y)
         var s = HUDStats()
         s.speedKmh = flight.speed * 3.6
+        s.jetEquipped = jetEquipped
+        s.jetOn = flight.jet
+        s.mach = flight.speed / 343
         s.altitude = flight.pos.y
         s.agl = flight.pos.y - ground
         s.score = rings.score
@@ -663,6 +746,118 @@ final class Game {
         fillMatchStats(&s)
         if fpsAccum.0 > 0.5 { s.fps = Float(fpsAccum.1) / fpsAccum.0; fpsAccum = (0, 0) } else { s.fps = stats.fps }
         statsLock.lock(); _stats = s; statsLock.unlock()
+    }
+
+    // MARK: The Finale
+
+    /// Play the end of The Finale (the world must be The Finale).
+    func startFinaleCutscene() { enqueue { $0.beginCutscene() } }
+    /// Esc twice: jump to the liftoff.
+    func skipCutscene() { enqueue { $0.cutscene?.skip() } }
+
+    private func beginCutscene() {
+        guard cutscene == nil, let rt = runtime as? FinaleRuntime else { return }
+        let cs = FinaleCutscene(scene: scene)
+        cs.birdSize = species.look.size
+        cs.onCrowned = { [weak self] in if let cb = self?.onCrowned { DispatchQueue.main.async(execute: cb) } }
+        cs.onJetpack = { [weak self] in
+            guard let self else { return }
+            self.bird.setJetpack(true)
+            if let cb = self.onJetpackGiven { DispatchQueue.main.async(execute: cb) }
+        }
+        rt.cutsceneActive = true
+        rings.root.isHidden = true
+        cutscene = cs
+    }
+
+    private func updateCutscene(_ cs: FinaleCutscene, _ rt: FinaleRuntime, _ dt: Float) {
+        let (eye, look, fov) = cs.advance(dt, rt: rt, sound: sound)
+        // The bird: walking (legs out, wings folded), standing, or blasting off.
+        let standing = cs.walking != nil
+        bird.node.isHidden = cs.hidden
+        bird.node.simdScale = SIMD3(repeating: cs.scale)
+        bird.node.simdPosition = cs.birdPos + SIMD3(0, standing ? bird.standHeight * cs.scale : 0, 0)
+        bird.node.simdOrientation = yawQuat(cs.birdYaw) * simd_quatf(angle: cs.birdPitch, axis: SIMD3(1, 0, 0))
+        bird.walk(phase: cs.walking)
+        let flutter: Float = standing ? 0 : 0.25 + 0.2 * sin(elapsed * 9)
+        bird.pose(left: WingPose(elevation: flutter, bend: 0), right: WingPose(elevation: flutter, bend: 0), fold: standing ? 1 : 0.2, pitchIn: 0,
+                  rollIn: 0, dt: dt)
+        bird.tick(dt: dt, speed: standing ? 0 : 30, camera: eye, emitting: false)
+        bird.jet(throttle: cs.throttle, time: elapsed, speed: 20)
+        cs.placeProps(hat: bird.hatTransform, body: bird.bodyTransform, rt: rt)
+        flight.pos = bird.node.simdPosition
+        flight.yaw = cs.birdYaw
+        // The kingdom around it.
+        rt.setCamera(eye)
+        _ = rt.update(dt: dt, time: elapsed, flight: flight, sound: sound)
+        sound?.setFlight(speed: standing ? 0 : 40, tuck: 0, stall: 0, roll: 0, ground: 0)
+        sound?.setWings(downL: 0, downR: 0, upL: 0, upR: 0)
+        sound?.setJet(gain: cs.throttle > 0.01 ? 0.95 : 0, speed: 60)
+        shake = max(0, shake - dt * 1.8)
+        terrain.update(center: eye, synchronous: synchronousTerrain)
+        clouds.update(center: eye)
+        camPos = eye; camLook = look
+        let jitter = cs.throttle > 0.5 ? SIMD3<Float>(sin(elapsed * 37), sin(elapsed * 29), 0) * 0.03 : .zero
+        cameraNode.simdPosition = eye + jitter
+        cameraNode.simdLook(at: look, up: kUp, localFront: SIMD3(0, 0, -1))
+        cameraNode.camera?.fieldOfView = CGFloat(fov)
+        statsLock.lock(); _cutsceneOverlay = cs.overlay; statsLock.unlock()
+        if cs.finished { endCutscene(cs, rt) }
+    }
+
+    private func endCutscene(_ cs: FinaleCutscene, _ rt: FinaleRuntime) {
+        cs.remove()
+        cutscene = nil
+        rt.cutsceneActive = false
+        bird.walk(phase: nil)
+        bird.node.simdScale = SIMD3(repeating: 1)
+        rings.root.isHidden = mode != .freeRoam
+        // Carry on from where the cutscene left the bird: high over the castle, heading south, the jetpack still lit.
+        let p = bird.node.simdPosition
+        flight.reset(at: p, yaw: cs.birdYaw)
+        flight.pitch = 0.15
+        flight.speed = 60
+        camOffset = SIMD3(0, 2, 6)
+        jetEquipped = true
+        jetOn = true
+        jetAutoOff = 1.8
+        statsLock.lock(); _cutsceneOverlay = nil; statsLock.unlock()
+        if let cb = onCutsceneDone { DispatchQueue.main.async(execute: cb) }
+    }
+
+    // MARK: The jetpack
+
+    /// Light the jetpack, or put it out.
+    func toggleJet() {
+        guard jetEquipped, !attract, cutscene == nil else { return }
+        jetOn.toggle()
+        let on = jetOn
+        if let cb = onJet { DispatchQueue.main.async { cb(on) } }
+    }
+
+    /// Sonic booms (and a vapour cone) as you pass each Mach number; a wrap round the world if you go absurdly far.
+    private func jetEffects(_ dt: Float) {
+        let mach = Int(flight.speed / 343)
+        if mach > machShown {
+            machShown = mach
+            sound?.sonicBoom(min(0.35 + 0.08 * Float(mach), 0.8))
+            shake = min(1, shake + 0.25)
+            let milestones = [1, 2, 3, 5, 10, 20, 50, 100]
+            if milestones.contains(mach), let cb = onNotice {
+                let text = mach == 1 ? "Sound barrier broken!" : "Mach \(mach)!"
+                DispatchQueue.main.async { cb(text) }
+            }
+        } else if flight.speed < Float(machShown) * 343 - 40 {
+            machShown = Int(flight.speed / 343)
+        }
+        // So far out that the numbers start to wobble: you've flown round the world and come back the other way.
+        let flat = SIMD2(flight.pos.x, flight.pos.z)
+        if simd_length(flat) > 400_000 {
+            flight.pos.x = -flight.pos.x * 0.99
+            flight.pos.z = -flight.pos.z * 0.99
+            bird.resetTrail()
+            if let cb = onNotice { DispatchQueue.main.async { cb("You flew right round the world!") } }
+        }
     }
 
     /// Distance, bearing (+ = right) and height difference from the bird to a point, for the HUD arrow.
@@ -694,6 +889,7 @@ final class Game {
         species = sp
         outfit = o
         let fresh = BirdNode(look: sp.look, outfit: o)
+        fresh.setJetpack(jetEquipped)
         fresh.node.simdPosition = bird.node.simdPosition
         fresh.node.simdOrientation = bird.node.simdOrientation
         bird.node.removeFromParentNode()
@@ -725,6 +921,21 @@ final class Game {
     }
 
     private func updateCamera(_ dt: Float, pos: SIMD3<Float>, fwd: SIMD3<Float>, roll: Float, speed: Float, yaw: Float) {
+        if attract {
+            // The title screen: a slow drift round the bird, a little below and to the side, the world going by.
+            let a = elapsed * 0.09
+            let desired = SIMD3<Float>(cos(a) * 7.5, 1.0 + 0.8 * sin(elapsed * 0.13), sin(a) * 7.5)
+            camOffset += (desired - camOffset) * approach(1.5, dt)
+            camPos = pos + camOffset
+            let camGround = TerrainShape.collisionGround(camPos.x, camPos.z, camPos.y)
+            camPos.y = max(camPos.y, camGround + 1.5)
+            if let runtime { camPos = runtime.constrainCamera(bird: pos, cam: camPos) }
+            camLook = pos + fwd * 1.5 + SIMD3(0, 0.3, 0)
+            cameraNode.simdPosition = camPos
+            cameraNode.simdLook(at: camLook, up: kUp, localFront: SIMD3(0, 0, -1))
+            cameraNode.camera?.fieldOfView = 52
+            return
+        }
         var flat = SIMD3(fwd.x, 0, fwd.z)
         if simd_length(flat) < 0.2 { flat = SIMD3(-sin(yaw), 0, -cos(yaw)) }
         flat = simd_normalize(flat)
@@ -738,7 +949,7 @@ final class Game {
         let desiredOffset = -back * dist + SIMD3(0, 1.45 * zoom, 0)
         camOffset += (desiredOffset - camOffset) * approach(5.5, dt)
         camPos = pos + camOffset
-        let camGround = max(TerrainShape.height(camPos.x, camPos.z), TerrainShape.waterLevel)
+        let camGround = TerrainShape.collisionGround(camPos.x, camPos.z, camPos.y)
         camPos.y = max(camPos.y, camGround + 1.2)
         if let runtime { camPos = runtime.constrainCamera(bird: pos, cam: camPos) }
         let lookOffset = fwd * 5 + SIMD3(0, 0.35, 0)
@@ -756,7 +967,27 @@ final class Game {
         let viewDir = simd_normalize(camLook - camPos)
         let up = simd_quatf(angle: camRoll, axis: viewDir).act(kUp)
         cameraNode.simdLook(at: camLook, up: up, localFront: SIMD3(0, 0, -1))
-        cameraNode.camera?.fieldOfView = CGFloat(58 + speedT * 24)
+        // With the jetpack going flat out the world stretches away (the view widens with every doubling of speed).
+        let warp: Float = speed > 120 ? min(34, log2(speed / 120) * 9) : 0
+        cameraNode.camera?.fieldOfView = CGFloat(58 + speedT * 24 + warp)
+    }
+
+    /// Going underground: the sun and sky light fade, the haze turns to tunnel dark, your eyes adjust and sounds echo.
+    private func applyUnderground(_ target: Float, _ dt: Float) {
+        let before = undergroundS
+        undergroundS += (target - undergroundS) * approach(target > undergroundS ? 2.2 : 1.4, dt)
+        if undergroundS < 0.002 && target == 0 { undergroundS = 0 }
+        guard undergroundS != before else { return }
+        let u = undergroundS, v = visuals
+        sun.light?.intensity = v.sunIntensity * CGFloat(1 - 0.9 * u)
+        scene.lightingEnvironment.intensity = v.envIntensity * CGFloat(1 - 0.82 * u)
+        scene.fogStartDistance = CGFloat(lerp(Float(v.fogStart), 6, u))
+        scene.fogEndDistance = CGFloat(lerp(Float(v.fogEnd), 175, u))
+        let fog = simd_mix(v.fogColor ?? v.horizon, SIMD3(0.025, 0.025, 0.03), SIMD3(repeating: u))
+        scene.fogColor = NSColor(srgbRed: CGFloat(fog.x), green: CGFloat(fog.y), blue: CGFloat(fog.z), alpha: 1)
+        cameraNode.camera?.exposureOffset = v.exposure + CGFloat(0.5 * u)
+        if world.kind == .city || world.kind == .west { CityShaders.setUnderground(u) }
+        if (before > 0.5) != (u > 0.5) { sound?.setCaveAmbience(u > 0.5 || world.kind == .caves) }
     }
 
     /// Lock-on brackets drawn around the targeted bird (fights).

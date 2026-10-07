@@ -149,6 +149,14 @@ extension Game {
             warm.append(OtherBird.featherPuff(color: .white))
         }
         if let run = bestRun { warm.append(GhostBird(run: run).bird.node) }
+        if worldID == .city {
+            // Chunks bring these in later; compile them now so the first street corner doesn't stutter.
+            for m in CityShaders.all + [WorldMaterials.finishes()] {
+                let n = SCNNode(geometry: SCNBox(width: 1, height: 1, length: 1, chamferRadius: 0))
+                n.geometry?.materials = [m]
+                warm.append(n)
+            }
+        }
         return warm
     }
 
@@ -772,6 +780,8 @@ extension Game {
         if finishTime != nil { f |= NetState.finished }
         if !participating { f |= NetState.spectator }
         if fighter.burnTime > 0 { f |= NetState.burning }
+        if jetEquipped { f |= NetState.jetpack }
+        if flight.jet { f |= NetState.jetFiring }
         let prog = Float(nextGate) + (finishTime != nil ? 1 : 0) + (track.map { progressS / max($0.length, 1) } ?? 0) * 0.001
         link.send(state: NetState(id: localId, p: flight.pos, q: flight.orientation.vector, v: flight.velocity, w: wingState,
                                   hp: fighter.health, flags: f, bird: species.id, progress: prog, lives: fighter.lives, t: now, fit: outfit.code))

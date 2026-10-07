@@ -144,6 +144,9 @@ final class BotPilot {
             to = simd_mix(to, home, SIMD3(repeating: smoothstep(90, 30, arena.distanceToWall(p))))
         }
 
+        // Buildings (and other solid things) in the way: go over them.
+        if let safer = runtime?.avoid(flight, goal: p + to) { to = safer - p }
+
         var roll: Float, pitch: Float
         if runtime is CaveRuntime, let steer = runtime?.autopilot(flight) {
             roll = steer.roll; pitch = steer.pitch
@@ -222,7 +225,7 @@ final class BotPilot {
             while remaining > 0 {
                 let h = min(remaining, 1.0 / 60.0)
                 _ = flight.step(h, input)
-                (runtime as? CaveRuntime)?.constrainQuietly(flight)
+                runtime?.constrainQuietly(flight)
                 remaining -= h
             }
             if let arena, let push = arena.constrain(flight) { flight.nudge(push * 8 * tuning.knockTaken) }

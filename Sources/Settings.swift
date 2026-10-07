@@ -19,6 +19,7 @@ final class SettingsCard: NSView {
     var onGraphics: ((GraphicsQuality?) -> Void)?
     var onVSync: ((Bool) -> Void)?
     var onAutoUpdate: ((Bool) -> Void)?
+    var onJetpack: ((Bool) -> Void)?
 
     private let card = WiiPanel()
     private let title = WiiLabel(26, bold: true)
@@ -30,6 +31,8 @@ final class SettingsCard: NSView {
     let chatBox = WiiToggle("Show chat")
     let fpsBox = WiiToggle("Show frame rate")
     let updatesBox = WiiToggle("Check for updates")
+    /// Only there once the jetpack is yours.
+    let jetpackBox = WiiToggle("Jetpack")
     let opacitySlider = WiiSlider("HUD opacity")
     let cameraSelector = WiiSelector("Camera")
     let previewBox = WiiToggle("Camera picture")
@@ -68,7 +71,7 @@ final class SettingsCard: NSView {
         for s in [cameraSelector, graphicsSelector] { s.inline = true; s.pillWidth = SettingsCard.control }
         opacitySlider.inline = true
         opacitySlider.trackWidth = SettingsCard.control
-        for v in [title, gameHeader, cameraHeader, screenHeader, soundBox, helpBox, chatBox, fpsBox, updatesBox, opacitySlider,
+        for v in [title, gameHeader, cameraHeader, screenHeader, soundBox, helpBox, chatBox, fpsBox, updatesBox, opacitySlider, jetpackBox,
                   cameraSelector, previewBox, graphicsSelector, vsyncBox, vsyncNote, done] as [NSView] {
             card.addSubview(v)
         }
@@ -77,6 +80,9 @@ final class SettingsCard: NSView {
         chatBox.onChange = { [weak self] on in self?.onChat?(on) }
         fpsBox.onChange = { [weak self] on in self?.onFPS?(on) }
         updatesBox.onChange = { [weak self] on in self?.onAutoUpdate?(on) }
+        jetpackBox.onChange = { [weak self] on in self?.onJetpack?(on) }
+        jetpackBox.toolTip = "Wear the jetpack. Clap your hands (or press B) to light it, clap again to let it go out"
+        jetpackBox.isHidden = true
         opacitySlider.onChange = { [weak self] v in self?.onHUDOpacity?(v) }
         previewBox.onChange = { [weak self] on in self?.onPreview?(on) }
         vsyncBox.onChange = { [weak self] on in
@@ -116,6 +122,8 @@ final class SettingsCard: NSView {
         var vsync: Bool
         /// The screen's highest refresh rate.
         var screenMaxFPS: Int
+        /// The jetpack on or off your back; nil until it's yours (then the row appears).
+        var jetpack: Bool? = nil
     }
 
     func show(_ v: Values) {
@@ -134,7 +142,10 @@ final class SettingsCard: NSView {
         graphicsSelector.value = graphicsName
         vsyncBox.setOn(v.vsync)
         screenMaxFPS = v.screenMaxFPS
+        jetpackBox.isHidden = v.jetpack == nil
+        jetpackBox.setOn(v.jetpack ?? false)
         updateVSyncNote()
+        needsLayout = true
     }
 
     /// What V-Sync is doing right now, and what the screen itself can show.
@@ -171,9 +182,11 @@ final class SettingsCard: NSView {
         super.layout()
         let R = SettingsCard.row, S = SettingsCard.section
         let pad: CGFloat = 34, gap: CGFloat = 48, w: CGFloat = 720
-        // Header band, section titles, six rows, the note's room, then Done.
+        // Header band, section titles, six rows (seven with the jetpack), the note's room, then Done.
+        let leftRows: [NSView] = [soundBox, helpBox, chatBox, fpsBox, updatesBox, opacitySlider] + (jetpackBox.isHidden ? [] : [jetpackBox])
+        let rowsN = CGFloat(max(leftRows.count, 6))
         let noteRoom: CGFloat = 8
-        let contentH = SettingsCard.header + 3 + 12 + S + 6 * R + noteRoom + 18 + 54 + 22
+        let contentH = SettingsCard.header + 3 + 12 + S + rowsN * R + noteRoom + 18 + 54 + 22
         let h = contentH + card.inset * 2
         card.frame = NSRect(x: ((bounds.width - w) / 2).rounded(), y: ((bounds.height - h) / 2).rounded(), width: w, height: h)
         let c = card.contentRect
@@ -186,9 +199,8 @@ final class SettingsCard: NSView {
         let rowsTop = sectionTop + S
         func rowFrame(_ x: CGFloat, _ i: Int) -> NSRect { NSRect(x: x, y: rowsTop + CGFloat(i) * R, width: colW, height: R) }
 
-        // Left: GAME, six rows.
+        // Left: GAME, six rows (and the jetpack).
         gameHeader.frame = NSRect(x: lx, y: sectionTop, width: colW, height: S)
-        let leftRows: [NSView] = [soundBox, helpBox, chatBox, fpsBox, updatesBox, opacitySlider]
         for (i, v) in leftRows.enumerated() { v.frame = rowFrame(lx, i) }
 
         // Right: CAMERA (two rows), SCREEN in row 2's place, two rows, then the V-Sync note under them.
@@ -202,7 +214,7 @@ final class SettingsCard: NSView {
         let noteH = vsyncNote.fittingHeight(width: colW)
         vsyncNote.frame = NSRect(x: rx, y: rowFrame(rx, 5).minY + 2, width: colW, height: noteH)
 
-        let doneY = rowsTop + 6 * R + noteRoom + 18
+        let doneY = rowsTop + rowsN * R + noteRoom + 18
         done.frame = NSRect(x: (c.midX - 110).rounded(), y: doneY, width: 220, height: 54)
     }
 }
@@ -217,5 +229,7 @@ enum Prefs {
     static var showChat: Bool { get { bool("chat.show", true) } set { d.set(newValue, forKey: "chat.show") } }
     static var showFPS: Bool { get { bool("hud.fps", true) } set { d.set(newValue, forKey: "hud.fps") } }
     static var vsync: Bool { get { bool("graphics.vsync", true) } set { d.set(newValue, forKey: "graphics.vsync") } }
+    /// The jetpack on your back (once you have it).
+    static var jetpack: Bool { get { bool("jetpack.equipped", true) } set { d.set(newValue, forKey: "jetpack.equipped") } }
 }
 

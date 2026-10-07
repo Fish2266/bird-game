@@ -155,6 +155,7 @@ final class ControlGaugeView: FlippedView {
 final class HUDView: NSView {
     private let statsBox = WiiPanel()
     private let speed = WiiLabel(34, bold: true)
+    private let speedSize: CGFloat = 34
     private let speedUnit = WiiLabel(13, color: Wii.textSoft)
     private let details = WiiLabel(13, color: Wii.textSoft)
     private let coins = WiiLabel(17, bold: true)
@@ -269,19 +270,7 @@ final class HUDView: NSView {
         helpBox.addSubview(helpTitle)
         helpBox.addSubview(help)
         helpTitle.text = "How to fly"
-        help.text = """
-        Flap your arms down to speed up and climb.
-        Tip your arms like wings to turn.
-        Hold both arms UP (above your shoulders) to fly up.
-        Hold them a little low to fly down. Tuck them in to dive.
-        Fly through the rings to earn ● coins.
-
-        Open your mouth wide to attack (in fights).
-
-        Keys: ←→ turn · ↑↓ up / down · Space flap · Shift dive
-        Return attack · Esc menu · N restart · T chat
-        R recalibrate · H help · C camera · P photo
-        """
+        setHelpText(jetpack: false)
         addSubview(gauge)
         addSubview(status)
 
@@ -531,6 +520,25 @@ final class HUDView: NSView {
 
     func setCoins(_ total: Int) { coins.text = "● \(total)" }
 
+    /// The help card (the jetpack only gets a mention once it's yours).
+    func setHelpText(jetpack: Bool) {
+        help.text = """
+        Flap your arms down to speed up and climb.
+        Tip your arms like wings to turn.
+        Hold both arms UP (above your shoulders) to fly up.
+        Hold them a little low to fly down. Tuck them in to dive.
+        Fly through the rings to earn ● coins.
+
+        Open your mouth wide to attack (in fights).
+        """ + (jetpack ? "\nClap your hands to light the jetpack; clap again to let it go out.\n" : "") + """
+
+        Keys: ←→ turn · ↑↓ up / down · Space flap · Shift dive
+        Return attack · Esc menu · N restart · T chat
+        R recalibrate · H help · C camera · P photo\(jetpack ? " · B jetpack" : "")
+        """
+        needsLayout = true
+    }
+
     func showLoss(coins lost: Int, total: Int) {
         lossFlash.text = lost > 0 ? "Ouch!  −\(lost) ●" : "Ouch!"
         lossFlash.alphaValue = 1
@@ -543,9 +551,16 @@ final class HUDView: NSView {
     }
 
     func update(_ s: HUDStats, pose: RawPose?, cameraName: String) {
-        speed.text = String(format: "%.0f", s.speedKmh)
-        details.text = s.mode == .freeRoam ? String(format: "Height %.0f m   Rings %d", s.agl, s.score)
+        // (With the jetpack the number gets very big: thousands become "k", and the digits shrink to fit.)
+        speed.text = s.speedKmh >= 100_000 ? String(format: "%.0fk", s.speedKmh / 1000) : String(format: "%.0f", s.speedKmh)
+        let digits = speed.text.count
+        let wantSize: CGFloat = digits <= 3 ? speedSize : (digits == 4 ? speedSize * 0.86 : speedSize * 0.7)
+        if speed.size != wantSize { speed.size = wantSize }
+        var line = s.mode == .freeRoam ? String(format: "Height %.0f m   Rings %d", s.agl, s.score)
             : (s.multiplayer ? String(format: "Height %.0f m   %d players", s.agl, s.players) : String(format: "Height %.0f m", s.agl))
+        if s.mach >= 1 { line = String(format: "Mach %.1f   ", s.mach) + line }
+        if s.jetEquipped { line = (s.jetOn ? "Jetpack ON   " : "Jetpack off   ") + line }
+        details.text = line
         streakLabel.isHidden = !s.streakEnabled
         let bonus = Double(Progress.streakBonus(s.streak))
         streakLabel.text = s.streak > 1 ? String(format: "Streak %d · ×%.2f", s.streak, bonus) : "Streak \(s.streak)"

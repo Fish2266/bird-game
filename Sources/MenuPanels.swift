@@ -155,6 +155,8 @@ final class PlayPanel: FlippedView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
+    func debugSelect(_ w: WorldID) { world = w; refresh() }
+
     func setPlaying(mode: GameMode, world: WorldID) {
         playingMode = mode
         playingWorld = world
@@ -182,13 +184,16 @@ final class PlayPanel: FlippedView {
             guard case .world(let w) = c.item else { continue }
             c.isHighlighted = w.kind == world
             c.isEquipped = w.kind == playingWorld
-            c.owned = progress.ownsWorld(w) || client
+            c.owned = progress.ownsWorld(w) || (client && !w.isFinale)
             c.affordable = progress.coins >= w.cost
         }
         let w = WorldCatalog.info(world.rawValue)
+        // The Finale stays a secret until it's open: no picture, no details.
+        let secret = w.isFinale && !progress.finaleUnlocked
         art.world = w
-        title.text = "\(mode.title) · \(w.name)"
-        blurb.text = mode.blurb
+        art.mystery = secret
+        title.text = secret ? w.name : "\(mode.title) · \(w.name)"
+        blurb.text = secret ? WorldCatalog.finaleTeaser : mode.blurb
         var rows: [String] = []
         switch mode {
         case .freeRoam:
@@ -205,10 +210,11 @@ final class PlayPanel: FlippedView {
                     "Green orbs heal you. Every bird has its own attack.",
                     host || client ? "Out of lives? Watch until the round ends." : "The arena wall starts closing after 45 seconds."]
         }
+        if secret { rows = ["Goals done:  \(progress.requiredGoalsDone) of \(GoalCatalog.required.count)"] }
         if client { rows.append("The host picks the mode and map.") } else if host { rows.append("Everyone in your game switches with you.") }
         for (i, l) in info.enumerated() { l.text = i < rows.count ? rows[i] : "" }
 
-        let owned = progress.ownsWorld(w) || client
+        let owned = progress.ownsWorld(w) || (client && !secret)
         let same = mode == playingMode && world == playingWorld
         let bots = mode == .pvp && !host && !client
         botCount.isHidden = !bots
@@ -218,6 +224,8 @@ final class PlayPanel: FlippedView {
         round.isHidden = !(host && same && mode != .freeRoam)
         if client {
             start.title = "Host picks the mode"; start.isEnabled = false
+        } else if secret {
+            start.title = "Locked"; start.isEnabled = false
         } else if !owned {
             start.title = "Unlock this map in Worlds"; start.isEnabled = false
         } else if host {
@@ -236,9 +244,11 @@ final class PlayPanel: FlippedView {
         let W = bounds.width
         modeHeader.isHidden = true
         mapHeader.isHidden = true
-        for (i, c) in modeCards.enumerated() { c.frame = TabLayout.cardFrame(i, areaW: W, top: 0) }
-        for (i, c) in mapCards.enumerated() { c.frame = TabLayout.cardFrame(i + TabLayout.columns, areaW: W, top: 0) }
-        let dy = TabLayout.detailTop
+        // Modes on the first row, maps below.
+        let rows = TabLayout.rows(TabLayout.columns + mapCards.count)
+        for (i, c) in modeCards.enumerated() { c.frame = TabLayout.cardFrame(i, areaW: W, top: 0, rows: rows) }
+        for (i, c) in mapCards.enumerated() { c.frame = TabLayout.cardFrame(i + TabLayout.columns, areaW: W, top: 0, rows: rows) }
+        let dy = TabLayout.detailTop(rows: rows)
         let dh = bounds.height - dy
         let pw = TabLayout.pictureWidth(W)
         art.frame = NSRect(x: 0, y: dy, width: pw, height: dh - TabLayout.actionH - 12)

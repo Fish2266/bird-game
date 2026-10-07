@@ -261,6 +261,58 @@ enum CosmeticModels {
                 n.addChildNode(Shapes.node(Shapes.ball(0.011, segments: 8), m, at: SIMD3(cos(a) * 0.084, 0.086, sin(a) * 0.084 * 1.12)))
             }
 
+        case "skycrown":
+            // The Crown of the Sky: taller than the shop's crown, with wing-shaped points, a jewel on each, a deep blue
+            // cap, a gold sun on the front, and a faint ring of light circling it.
+            let gold = Shapes.mat(c(1.0, 0.8, 0.32), rough: 0.16, metal: 1.0, doubleSided: true)
+            let band = Shapes.lathe([SIMD2(0.08, 0.06), SIMD2(0.084, 0.066), SIMD2(0.086, 0.112), SIMD2(0.082, 0.118)], segments: 40, stretchZ: 1.12)
+            n.addChildNode(Shapes.node(band, gold))
+            n.addChildNode(Shapes.node(headDome(baseY: 0.062, topY: 0.17, grow: 0.004, fullness: 2.2), Shapes.mat(c(0.12, 0.18, 0.55), rough: 0.7)))
+            let jewels = [c(0.95, 0.12, 0.2), c(0.2, 0.45, 1.0), c(0.2, 0.9, 0.45), c(1.0, 0.85, 0.3), c(0.8, 0.35, 1.0)]
+            for k in 0..<10 {
+                let a = Float(k) / 10 * 2 * .pi
+                let tall: Float = k % 2 == 0 ? 0.085 : 0.055
+                let base = SIMD3(cos(a) * 0.083, 0.112, sin(a) * 0.083 * 1.12)
+                // A feather-like point, swept a little outward.
+                let tip = base + SIMD3(cos(a) * 0.018, tall, sin(a) * 0.02)
+                n.addChildNode(Shapes.node(Shapes.tube([base, (base + tip) / 2 + SIMD3(cos(a) * 0.006, 0, sin(a) * 0.006), tip],
+                                                       radii: [0.016, 0.011, 0.002], sides: 6), gold))
+                let g = jewels[k % jewels.count]
+                let m = Shapes.mat(g, rough: 0.08, metal: 0.3, glow: g.blended(withFraction: 0.5, of: .black))
+                n.addChildNode(Shapes.node(Shapes.ball(k % 2 == 0 ? 0.011 : 0.008, segments: 8), m, at: tip + SIMD3(0, 0.006, 0)))
+            }
+            // The sun on the front.
+            let sun = SCNNode()
+            sun.simdPosition = SIMD3(0, 0.09, -0.097)
+            sun.addChildNode(Shapes.node(Shapes.ball(0.014, segments: 10), Shapes.mat(c(1.0, 0.86, 0.4), rough: 0.1, metal: 1.0, glow: c(0.6, 0.45, 0.1))))
+            for k in 0..<8 {
+                let a = Float(k) / 8 * 2 * .pi
+                let ray = Shapes.node(Shapes.tube([SIMD3(cos(a) * 0.014, sin(a) * 0.014, 0), SIMD3(cos(a) * 0.027, sin(a) * 0.027, -0.002)],
+                                                  radii: [0.004, 0.001], sides: 4), gold)
+                sun.addChildNode(ray)
+            }
+            n.addChildNode(sun)
+            // A ring of light that drifts round it.
+            let halo = SCNNode(geometry: SCNTorus(ringRadius: 0.12, pipeRadius: 0.004))
+            (halo.geometry as? SCNTorus)?.ringSegmentCount = 48
+            halo.geometry?.materials = [Shapes.glow(c(1.0, 0.9, 0.55), 2.2)]
+            halo.simdPosition = SIMD3(0, 0.15, 0)
+            n.addChildNode(halo)
+            var sparkles: [SCNNode] = []
+            for k in 0..<3 {
+                let sp = Shapes.node(Shapes.ball(0.006, segments: 6), Shapes.glow(c(1.0, 0.95, 0.75), 3))
+                n.addChildNode(sp)
+                sparkles.append(sp)
+                _ = k
+            }
+            animators.append { _, _, t in
+                halo.simdOrientation = simd_quatf(angle: 0.18 * sin(t * 0.9), axis: SIMD3(1, 0, 0)) * simd_quatf(angle: t * 0.6, axis: SIMD3(0, 1, 0))
+                for (k, sp) in sparkles.enumerated() {
+                    let a = t * 1.3 + Float(k) * 2.1
+                    sp.simdPosition = SIMD3(cos(a) * 0.12, 0.15 + 0.02 * sin(t * 2 + Float(k)), sin(a) * 0.12 * 1.1)
+                }
+            }
+
         case "grad":
             let black = Shapes.mat(c(0.08, 0.08, 0.10), rough: 0.6)
             n.addChildNode(Shapes.node(headDome(baseY: 0.045, topY: 0.128, grow: 0.008), black))
@@ -317,6 +369,43 @@ enum CosmeticModels {
             holder.simdOrientation = simd_quatf(angle: -0.18, axis: SIMD3(1, 0, 0))
             n.addChildNode(holder)
             animators.append { _, _, t in holder.simdPosition = SIMD3(0, 0.2 + 0.01 * sin(t * 2.2), 0.01) }
+
+        case "dinohood":
+            // A T. rex costume hood: a green dome, the upper jaw over the brow with a row of teeth, eyes on top, spines
+            // down the back.
+            let green = Shapes.mat(c(0.34, 0.62, 0.30), rough: 0.8)
+            let dark = Shapes.mat(c(0.22, 0.44, 0.2), rough: 0.8)
+            n.addChildNode(Shapes.node(headDome(baseY: 0.05, topY: 0.18, grow: 0.012, fullness: 2.8), green))
+            let snout = Shapes.node(Shapes.ball(1, segments: 16), green, at: SIMD3(0, 0.14, -0.1))
+            snout.simdScale = SIMD3(0.072, 0.048, 0.11)
+            snout.simdOrientation = simd_quatf(angle: 0.12, axis: SIMD3(1, 0, 0))
+            n.addChildNode(snout)
+            let ivory = Shapes.mat(c(0.98, 0.96, 0.88), rough: 0.5)
+            for k in 0..<5 {
+                for s: Float in [-1, 1] {
+                    let t = Float(k) / 4
+                    let at = SIMD3<Float>(s * (0.052 - 0.02 * t), 0.118 - 0.012 * t, -0.045 - 0.125 * t)
+                    let tooth = Shapes.node(SCNCone(topRadius: 0, bottomRadius: 0.009, height: 0.026), ivory, at: at - SIMD3(0, 0.012, 0))
+                    tooth.simdOrientation = simd_quatf(angle: .pi, axis: SIMD3(1, 0, 0))
+                    n.addChildNode(tooth)
+                }
+            }
+            for s: Float in [-1, 1] {
+                n.addChildNode(Shapes.node(Shapes.ball(0.024, segments: 12), Shapes.mat(c(0.98, 0.95, 0.6), rough: 0.4), at: SIMD3(s * 0.045, 0.188, -0.06)))
+                n.addChildNode(Shapes.node(Shapes.ball(0.012, segments: 8), Shapes.mat(c(0.05, 0.05, 0.05), rough: 0.3), at: SIMD3(s * 0.047, 0.194, -0.079)))
+                let brow = Shapes.node(Shapes.ball(1, segments: 8), dark, at: SIMD3(s * 0.045, 0.208, -0.058))
+                brow.simdScale = SIMD3(0.028, 0.009, 0.018)
+                n.addChildNode(brow)
+                n.addChildNode(Shapes.node(Shapes.ball(0.008, segments: 6), Shapes.mat(c(0.12, 0.2, 0.1), rough: 0.8), at: SIMD3(s * 0.02, 0.163, -0.205)))
+            }
+            for k in 0..<4 {
+                let t = Float(k) / 3
+                let spine = Shapes.node(SCNCone(topRadius: 0, bottomRadius: CGFloat(0.018 - 0.004 * t), height: CGFloat(0.04 - 0.008 * t)),
+                                        Shapes.mat(c(0.95, 0.6, 0.2), rough: 0.7),
+                                        at: SIMD3(0, 0.19 - 0.07 * t * t, 0.02 + 0.075 * t))
+                spine.simdOrientation = simd_quatf(angle: 0.4 + 0.7 * t, axis: SIMD3(1, 0, 0))
+                n.addChildNode(spine)
+            }
 
         default:
             return nil
@@ -704,6 +793,23 @@ enum CosmeticModels {
             let star = Shapes.node(Shapes.extrude(Shapes.star(0.027, 0.012), depth: 0.005), Shapes.mat(c(1.0, 0.93, 0.62), rough: 0.2, metal: 1.0))
             star.simdPosition = SIMD3(0, 0, 0.007)
             disc.addChildNode(star)
+
+        case "sheriff":
+            // A leather strap with the six-pointed tin star on the chest.
+            let leather = Shapes.mat(c(0.55, 0.36, 0.2), rough: 0.7)
+            n.addChildNode(Shapes.node(Shapes.tube(collarPath(grow: 0.003), radii: Array(repeating: 0.007, count: 33), sides: 6), leather))
+            let gold = Shapes.mat(c(1.0, 0.8, 0.32), rough: 0.22, metal: 1.0)
+            let at = SIMD3<Float>(0, neckCenter.y - neckRadius.y - 0.012, neckCenter.z - 0.085)
+            let star = Shapes.node(Shapes.extrude(Shapes.star(0.064, 0.034, points: 6), depth: 0.01), gold, at: at)
+            star.simdOrientation = simd_quatf(angle: -0.55, axis: SIMD3(1, 0, 0)) * simd_quatf(angle: .pi, axis: SIMD3(0, 1, 0))
+            for k in 0..<6 {
+                let a = Float.pi / 2 + Float(k) / 6 * 2 * .pi
+                star.addChildNode(Shapes.node(Shapes.ball(0.009, segments: 6), gold, at: SIMD3(cos(a) * 0.066, sin(a) * 0.066, 0)))
+            }
+            let boss = Shapes.node(Shapes.extrude(Shapes.circle(0.019, 18), depth: 0.004), Shapes.mat(c(0.86, 0.66, 0.28), rough: 0.4, metal: 1.0))
+            boss.simdPosition = SIMD3(0, 0, 0.007)
+            star.addChildNode(boss)
+            n.addChildNode(star)
 
         case "lei":
             let colors = [c(1.0, 0.45, 0.65), c(0.99, 0.96, 0.9), c(0.72, 0.45, 0.95), c(1.0, 0.62, 0.22)]

@@ -154,6 +154,12 @@ final class ShopCardView: FlippedView {
             let well = NSBezierPath(roundedRect: sw.insetBy(dx: -4, dy: -4), xRadius: 9, yRadius: 9)
             NSColor(srgbRed: 0.86, green: 0.93, blue: 0.98, alpha: 1).setFill(); well.fill()
             BirdIcon.draw(b.look, in: sw.insetBy(dx: -3, dy: -3), alpha: owned && !b.comingSoon ? 1 : 0.45)
+        case .world(let w) where w.isFinale && !owned:
+            // Locked: a night sky, a dark castle against it, a question mark in gold.
+            let path = NSBezierPath(roundedRect: sw, xRadius: 7, yRadius: 7)
+            NSGradient(starting: NSColor(srgbRed: 0.05, green: 0.04, blue: 0.12, alpha: 1), ending: NSColor(srgbRed: 0.22, green: 0.12, blue: 0.3, alpha: 1))?
+                .draw(in: path, angle: 90)
+            Wii.drawText("?", in: sw, size: 20, bold: true, color: NSColor(srgbRed: 1, green: 0.8, blue: 0.35, alpha: 1), align: .center, centerV: true)
         case .world(let w) where !w.comingSoon && WorldArtView.screenshot(w.id) != nil:
             let img = WorldArtView.screenshot(w.id)!
             let path = NSBezierPath(roundedRect: sw, xRadius: 7, yRadius: 7)
@@ -170,7 +176,8 @@ final class ShopCardView: FlippedView {
             NSBezierPath(ovalIn: NSRect(x: sw.minX - 8, y: sw.midY + 3, width: sw.width + 16, height: sw.height)).fill()
             NSGraphicsContext.restoreGraphicsState()
         }
-        if case .world = item, !owned || comingSoon {
+        let lockedFinale: Bool = { if case .world(let w) = item { return w.isFinale && !owned }; return false }()
+        if case .world = item, (!owned || comingSoon) && !lockedFinale {
             NSColor.white.withAlphaComponent(0.55).setFill(); NSBezierPath(roundedRect: sw, xRadius: 7, yRadius: 7).fill()
         }
         let tx = sw.maxX + 10, tw = r.maxX - tx - 8
@@ -179,6 +186,7 @@ final class ShopCardView: FlippedView {
         let status: String
         var color = Wii.textSoft
         if comingSoon { status = "Coming soon" }
+        else if lockedFinale { status = "Locked"; color = NSColor(srgbRed: 0.55, green: 0.42, blue: 0.75, alpha: 1) }
         else if isEquipped { status = "Selected"; color = Wii.blue }
         else if owned { status = "Owned" }
         else { status = "● \(cost)"; if !affordable { color = NSColor(srgbRed: 0.8, green: 0.35, blue: 0.3, alpha: 1) } }
@@ -187,8 +195,51 @@ final class ShopCardView: FlippedView {
 }
 
 /// Simple painting of a world for the shop.
+/// A world's secrets on its page in the menu: what secrets are, how many are found, and a line for each — what it was
+/// once found, a clue while it's still hidden.
+final class SecretsListView: FlippedView {
+    var world = "" { didSet { needsDisplay = true } }
+    var found: Set<String> = [] { didSet { needsDisplay = true } }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let ids = WorldCatalog.secrets[world], !ids.isEmpty else { return }
+        let r = bounds
+        Wii.tile(r, radius: 10, fill: NSColor(white: 1, alpha: 0.7), bottom: Wii.tileLow, border: Wii.border, borderWidth: 1, shadow: false)
+        let n = ids.filter(found.contains).count
+        let x = r.minX + 12, w = r.width - 24
+        Wii.drawText("SECRETS", in: NSRect(x: x, y: r.minY + 9, width: 100, height: 16), size: 12, bold: true, color: Wii.textSoft)
+        Wii.drawText(n == ids.count ? "All \(n) found!" : "\(n) of \(ids.count) found  ·  \(ids.count - n) left",
+                     in: NSRect(x: x, y: r.minY + 8, width: w, height: 18), size: 13, bold: true,
+                     color: n == ids.count ? NSColor(srgbRed: 0.25, green: 0.6, blue: 0.35, alpha: 1) : Wii.text, align: .right)
+        Wii.drawText("Hidden places and moments in this world. Each pays coins the first time you find it.",
+                     in: NSRect(x: x, y: r.minY + 28, width: w, height: 16), size: 11.5, color: Wii.textSoft, truncate: true)
+        let top = r.minY + 48
+        let line = min(22, (r.maxY - 6 - top) / CGFloat(ids.count))
+        for (i, id) in ids.enumerated() {
+            let y = top + CGFloat(i) * line
+            let info = WorldCatalog.secretInfo[id] ?? (name: id, clue: "?")
+            let got = found.contains(id)
+            let mark = NSRect(x: x, y: y + (line - 16) / 2, width: 16, height: 16)
+            if got {
+                NSColor(srgbRed: 0.28, green: 0.72, blue: 0.4, alpha: 1).setFill(); NSBezierPath(ovalIn: mark).fill()
+                let tick = NSBezierPath()
+                tick.move(to: NSPoint(x: mark.minX + 4.2, y: mark.midY)); tick.line(to: NSPoint(x: mark.minX + 7, y: mark.midY + 3.2))
+                tick.line(to: NSPoint(x: mark.maxX - 3.6, y: mark.minY + 4.6))
+                tick.lineWidth = 2; tick.lineCapStyle = .round; NSColor.white.setStroke(); tick.stroke()
+            } else {
+                NSColor(srgbRed: 0.55, green: 0.42, blue: 0.75, alpha: 1).setFill(); NSBezierPath(ovalIn: mark).fill()
+                Wii.drawText("?", in: mark.offsetBy(dx: 0, dy: 0.5), size: 11, bold: true, color: .white, align: .center, centerV: true)
+            }
+            Wii.drawText(got ? info.name : info.clue, in: NSRect(x: x + 24, y: y, width: w - 24, height: line), size: 12.5, bold: got,
+                         color: got ? Wii.text : Wii.textSoft, centerV: true, truncate: true)
+        }
+    }
+}
+
 final class WorldArtView: FlippedView {
     var world: WorldInfo? { didSet { needsDisplay = true } }
+    /// The Finale before it's open: a castle in the dark and a question.
+    var mystery = false { didSet { needsDisplay = true } }
 
     private static var shots: [String: NSImage] = [:]
     /// Real screenshot bundled with the app (playable worlds only).
@@ -206,6 +257,11 @@ final class WorldArtView: FlippedView {
         let clip = NSBezierPath(roundedRect: r, xRadius: 12, yRadius: 12)
         NSGraphicsContext.saveGraphicsState()
         clip.addClip()
+        if mystery {
+            drawMystery(r)
+            NSGraphicsContext.restoreGraphicsState()
+            return
+        }
         if !w.comingSoon, let img = Self.screenshot(w.id) {
             // Aspect-fill the screenshot.
             let s = max(r.width / img.size.width, r.height / img.size.height)
@@ -280,6 +336,42 @@ final class WorldArtView: FlippedView {
             Wii.drawText("Coming soon", in: r, size: 18, bold: true, color: Wii.textSoft, align: .center, centerV: true)
         }
         NSGraphicsContext.restoreGraphicsState()
+    }
+}
+
+extension WorldArtView {
+    /// Night over a castle on a hill, every window dark, stars, and a question in gold.
+    fileprivate func drawMystery(_ r: NSRect) {
+        NSGradient(starting: NSColor(srgbRed: 0.03, green: 0.03, blue: 0.09, alpha: 1), ending: NSColor(srgbRed: 0.2, green: 0.1, blue: 0.28, alpha: 1))?
+            .draw(in: r, angle: 90)
+        NSColor.white.withAlphaComponent(0.8).setFill()
+        for i in 0..<40 {
+            let x = r.minX + r.width * CGFloat((i * 37 + 11) % 100) / 100, y = r.minY + r.height * 0.6 * CGFloat((i * 53 + 7) % 100) / 100
+            let s: CGFloat = i % 5 == 0 ? 2.2 : 1.3
+            NSBezierPath(ovalIn: NSRect(x: x, y: y, width: s, height: s)).fill()
+        }
+        // The hill and the castle, black against the sky.
+        let hill = NSBezierPath()
+        hill.move(to: NSPoint(x: r.minX, y: r.maxY))
+        hill.curve(to: NSPoint(x: r.maxX, y: r.maxY), controlPoint1: NSPoint(x: r.minX + r.width * 0.3, y: r.maxY - r.height * 0.45),
+                   controlPoint2: NSPoint(x: r.maxX - r.width * 0.3, y: r.maxY - r.height * 0.45))
+        hill.close()
+        let ink = NSColor(srgbRed: 0.04, green: 0.03, blue: 0.07, alpha: 1)
+        ink.setFill(); hill.fill()
+        let base = r.maxY - r.height * 0.3, cx = r.midX
+        NSBezierPath(rect: NSRect(x: cx - r.width * 0.26, y: base - r.height * 0.1, width: r.width * 0.52, height: r.height * 0.12)).fill()
+        for (dx, h, w) in [(-0.26, 0.2, 0.07), (0.19, 0.2, 0.07), (-0.08, 0.3, 0.09), (0.04, 0.42, 0.06)] as [(CGFloat, CGFloat, CGFloat)] {
+            let x = cx + r.width * dx
+            NSBezierPath(rect: NSRect(x: x, y: base - r.height * h, width: r.width * w, height: r.height * h)).fill()
+            let roof = NSBezierPath()
+            roof.move(to: NSPoint(x: x - r.width * 0.012, y: base - r.height * h))
+            roof.line(to: NSPoint(x: x + r.width * w / 2, y: base - r.height * (h + 0.11)))
+            roof.line(to: NSPoint(x: x + r.width * (w + 0.012), y: base - r.height * h))
+            roof.close(); roof.fill()
+        }
+        let gold = NSColor(srgbRed: 1, green: 0.8, blue: 0.35, alpha: 1)
+        Wii.drawText("?", in: NSRect(x: r.minX, y: r.minY + r.height * 0.08, width: r.width, height: r.height * 0.4), size: 64, bold: true,
+                     color: gold, align: .center, centerV: true)
     }
 }
 
@@ -445,11 +537,16 @@ enum TabLayout {
     static let gap: CGFloat = 18
     static let actionH: CGFloat = 60
     static func pictureWidth(_ areaW: CGFloat) -> CGFloat { min(260, areaW * 0.34) }
-    static func cardFrame(_ i: Int, areaW: CGFloat, top: CGFloat) -> NSRect {
-        let w = (areaW + 10) / CGFloat(columns)
-        return NSRect(x: -5 + CGFloat(i % columns) * w, y: top + CGFloat(i / columns) * cardH, width: w, height: cardH)
+    /// Rows a grid of `count` cards needs (at least two, so the details don't jump around between tabs).
+    static func rows(_ count: Int) -> Int { max(2, (count + columns - 1) / columns) }
+    /// Cards get a little shorter when there are three rows of them.
+    static func rowHeight(_ rows: Int) -> CGFloat { rows > 2 ? 64 : cardH }
+    static func cardFrame(_ i: Int, areaW: CGFloat, top: CGFloat, rows: Int = 2) -> NSRect {
+        let w = (areaW + 10) / CGFloat(columns), h = rowHeight(rows)
+        return NSRect(x: -5 + CGFloat(i % columns) * w, y: top + CGFloat(i / columns) * h, width: w, height: h)
     }
-    static var detailTop: CGFloat { cardH * 2 + gap }
+    static func detailTop(rows: Int) -> CGFloat { rowHeight(rows) * CGFloat(max(rows, 2)) + gap }
+    static var detailTop: CGFloat { detailTop(rows: 2) }
 }
 
 /// The tabs on the right of the pause menu.
@@ -495,6 +592,8 @@ final class PauseMenuView: NSView {
     /// Bought, wore or took off a cosmetic.
     var onOutfitChanged: ((Outfit) -> Void)? { didSet { stylePanel.onOutfitChanged = onOutfitChanged } }
     var onTutorial: (() -> Void)?
+    /// Back to the title screen.
+    var onMainMenu: (() -> Void)?
     /// The update row's button.
     var onUpdateAction: (() -> Void)? { didSet { updateRow.onAction = onUpdateAction } }
 
@@ -509,6 +608,7 @@ final class PauseMenuView: NSView {
     private let recal = WiiButton("Recalibrate", textSize: 16)
     private let tutorialButton = WiiButton("Tutorial", textSize: 16)
     private let settingsButton = WiiButton("Settings", textSize: 16)
+    private let mainMenuButton = WiiButton("Main Menu", textSize: 16)
     private let lifetime = WiiLabel(12, color: Wii.textSoft)
     private let version = WiiLabel(11, color: Wii.textSoft)
     let updateRow = UpdateRowView()
@@ -527,6 +627,7 @@ final class PauseMenuView: NSView {
     private var showingShop: Bool { tab == .birds || tab == .worlds }
     private let worldArt = WorldArtView()
     private var worldInfo: [WiiLabel] = []
+    private let secretsList = SecretsListView()
     private var viewingWorld: WorldInfo
     private let preview = BirdPreviewView(frame: .zero)
     private let previewFrame = WiiFrame()
@@ -580,10 +681,10 @@ final class PauseMenuView: NSView {
         raiseButton.arrow = 1
         lowerButton.toolTip = "Turn one upgrade off (no refund — turn it back on any time)  ←"
         raiseButton.toolTip = "Turn a switched-off upgrade back on for free  →"
-        for v in [title, coinLabel, resume, restart, recal, tutorialButton, settingsButton,
+        for v in [title, coinLabel, resume, restart, recal, tutorialButton, settingsButton, mainMenuButton,
                   lifetime, version, shopHeader, shopSub, tabs, preview, previewFrame, worldArt, detailTitle, detailBlurb,
                   attackLine, statSelect, statPanel, statTitle, statBlurb, statHint, statLevel, lowerButton, raiseButton, buyButton,
-                  action, playPanel, lanPanel, stylePanel, goalsPanel, updateRow] as [NSView] {
+                  action, playPanel, lanPanel, stylePanel, goalsPanel, updateRow, secretsList] as [NSView] {
             panel.addSubview(v)
         }
 
@@ -594,6 +695,8 @@ final class PauseMenuView: NSView {
         tutorialButton.toolTip = "A quick walk-through: how to fly, the modes, the shop and the hidden tricks. Jump to any step."
         settingsButton.onClick = { [weak self] in self?.showSettings() }
         settingsButton.toolTip = "Sound, the camera, the HUD, chat, graphics and updates"
+        mainMenuButton.onClick = { [weak self] in self?.onMainMenu?() }
+        mainMenuButton.toolTip = "Back to the title screen"
         settings.onClose = { [weak self] in self?.hideSettings() }
         lowerButton.onClick = { [weak self] in self.map { $0.lower(BirdStat(rawValue: $0.selectedStat)!) } }
         raiseButton.onClick = { [weak self] in self.map { $0.raise(BirdStat(rawValue: $0.selectedStat)!) } }
@@ -785,6 +888,8 @@ final class PauseMenuView: NSView {
 
     /// Test hook: open a tab.
     func debugShowTab(_ t: MenuTab) { select(tab: t) }
+    func debugShowPlayMap(_ w: WorldID) { select(tab: .play); playPanel.debugSelect(w) }
+    func debugScrollGoalsToEnd() { goalsPanel.debugScrollToEnd() }
     /// Test hook: the Birds tab showing one bird.
     func debugShowBird(_ sp: Species) { select(tab: .birds); view(sp) }
 
@@ -840,7 +945,8 @@ final class PauseMenuView: NSView {
         case .worlds: shopHeader.text = "Worlds"; shopSub.text = "Unlock new worlds to fly, race and fight in."
         case .goals:
             shopHeader.text = "Goals"
-            shopSub.text = "\(progress.goalsDoneCount) of \(GoalCatalog.all.count) done. Goals pay bonus coins and unlock cosmetics you can't buy."
+            shopSub.text = "\(progress.goalsDoneCount) of \(GoalCatalog.all.count) done. Goals pay coins and unlock things you can't buy. "
+                + (progress.finaleUnlocked ? "The Finale is open." : "Finish them all and something opens…")
             goalsPanel.refresh()
         }
         for c in birdCards {
@@ -866,6 +972,7 @@ final class PauseMenuView: NSView {
         for i in 0..<statBars.count { for v in [statNames[i], statBars[i], statValues[i]] as [NSView] { v.isHidden = !birds } }
         worldArt.isHidden = !showingWorlds
         for l in worldInfo { l.isHidden = !showingWorlds }
+        secretsList.isHidden = true
         for v in [detailTitle, detailBlurb, action] as [NSView] { v.isHidden = !showingShop }
         if showingWorlds { refreshWorld(); needsLayout = true; needsDisplay = true; return }
         if !showingShop { needsLayout = true; needsDisplay = true; return }
@@ -932,10 +1039,26 @@ final class PauseMenuView: NSView {
     private func refreshWorld() {
         let w = viewingWorld
         worldArt.world = w
+        let locked = w.isFinale && !progress.finaleUnlocked
+        worldArt.mystery = locked
         detailTitle.text = w.name
-        detailBlurb.text = w.blurb
+        detailBlurb.text = locked ? WorldCatalog.finaleTeaser : w.blurb
+        if locked {
+            let rows = ["Goals done:  \(progress.requiredGoalsDone) of \(GoalCatalog.required.count)", "", "", "", ""]
+            for (l, t) in zip(worldInfo, rows) { l.text = t }
+            secretsList.isHidden = true
+            action.title = "Locked"; action.isEnabled = false
+            return
+        }
         let st = progress.stats(w)
-        let rows: [String] = w.isChallenge || w.comingSoon ? [
+        let secrets = WorldCatalog.secrets[w.id]
+        let rows: [String] = secrets != nil ? [
+            // Short, so the secrets fit underneath.
+            "Ring value:  \(w.multiplierText) (double with a streak)   ·   Boost: +\(Int(w.ringBoost * 3.6)) km/h",
+            "Hazards:  \(w.hazards)",
+            "Best streak:  \(st.bestStreak)   ·   Rings here: \(st.rings)   ·   Coins earned: \(st.coins)",
+            "", "",
+        ] : w.isChallenge || w.comingSoon ? [
             "Ring value:  \(w.multiplierText), up to double with a streak",
             "Ring boost:  +\(Int(w.ringBoost * 3.6)) km/h",
             "Hazards:  \(w.hazards)",
@@ -949,6 +1072,10 @@ final class PauseMenuView: NSView {
             "Coins earned here:  \(st.coins)",
         ]
         for (l, t) in zip(worldInfo, rows) { l.text = t }
+        secretsList.isHidden = secrets == nil || !showingWorlds
+        secretsList.world = w.id
+        secretsList.found = Set((secrets ?? []).filter(progress.discovered))
+        needsLayout = true
         if w.comingSoon {
             action.title = "Coming soon"; action.isEnabled = false
         } else if !progress.ownsWorld(w) {
@@ -957,6 +1084,8 @@ final class PauseMenuView: NSView {
             action.title = "Host picks the map"; action.isEnabled = false
         } else if w.id == progress.world.id {
             action.title = "You're here"; action.isEnabled = false
+        } else if w.isFinale && !progress.finaleSeen && lan.role != .hosting {
+            action.title = "Enter The Finale"; action.isEnabled = true
         } else {
             action.title = lan.role == .hosting ? "Take everyone here" : "Travel here"; action.isEnabled = true
         }
@@ -1021,7 +1150,7 @@ final class PauseMenuView: NSView {
         // Left column
         let sx = pad, sw: CGFloat = 230
         var y = sep + 20
-        for b in [resume, restart, recal, tutorialButton, settingsButton] {
+        for b in [resume, restart, recal, tutorialButton, settingsButton, mainMenuButton] {
             b.frame = NSRect(x: sx - 5, y: y, width: sw + 10, height: 52); y += 58
         }
         y += 10
@@ -1043,12 +1172,13 @@ final class PauseMenuView: NSView {
         lanPanel.frame = NSRect(x: x0, y: sep + 80, width: areaW, height: H - 30 - (sep + 80))
         stylePanel.frame = NSRect(x: x0, y: gridTop, width: areaW, height: H - 30 - gridTop)
         goalsPanel.frame = NSRect(x: x0, y: gridTop, width: areaW, height: H - 30 - gridTop)
-        for cards in [birdCards, worldCards] {
+        let birdRows = TabLayout.rows(birdCards.count), worldRows = TabLayout.rows(worldCards.count)
+        for (cards, rows) in [(birdCards, birdRows), (worldCards, worldRows)] {
             for (i, card) in cards.enumerated() {
-                card.frame = TabLayout.cardFrame(i, areaW: areaW, top: 0).offsetBy(dx: x0, dy: gridTop)
+                card.frame = TabLayout.cardFrame(i, areaW: areaW, top: 0, rows: rows).offsetBy(dx: x0, dy: gridTop)
             }
         }
-        let dy = gridTop + TabLayout.detailTop
+        let dy = gridTop + TabLayout.detailTop(rows: tab == .worlds ? worldRows : birdRows)
         let dh = H - 30 - dy
         let pw = TabLayout.pictureWidth(areaW)
         let pictureH = dh - TabLayout.actionH - 12
@@ -1060,9 +1190,14 @@ final class PauseMenuView: NSView {
         let cx = x0 + pw + 28, cw = areaW - pw - 28
         detailTitle.frame = NSRect(x: cx, y: dy - 4, width: cw, height: 30)
         detailBlurb.frame = NSRect(x: cx, y: dy + 30, width: cw, height: detailBlurb.fittingHeight(width: cw))
+        let compact = !secretsList.isHidden
         for (i, l) in worldInfo.enumerated() {
-            l.frame = NSRect(x: cx, y: dy + 30 + max(detailBlurb.frame.height, 36) + 14 + CGFloat(i) * 32, width: cw, height: 28)
+            l.frame = NSRect(x: cx, y: dy + 30 + max(detailBlurb.frame.height, 36) + (compact ? 6 : 14) + CGFloat(i) * (compact ? 24 : 32),
+                             width: cw, height: compact ? 22 : 28)
         }
+        // The secrets box: under the facts, down to the bottom of the button.
+        let secretsTop = worldInfo[2].frame.maxY + 8
+        secretsList.frame = NSRect(x: cx, y: secretsTop, width: cw, height: max(120, dy + dh - secretsTop))
 
         // Birds: stat list, then the panel for the picked stat (bottom-aligned with the main button).
         attackLine.frame = NSRect(x: cx, y: dy + 30 + max(detailBlurb.frame.height, 18) + 2, width: cw, height: 16)

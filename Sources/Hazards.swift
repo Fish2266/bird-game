@@ -9,6 +9,15 @@ struct HazardHit {
     var kind: HitKind
 }
 
+/// Coins a world hands out for something you did: a token picked up, a landmark discovered.
+struct WorldReward {
+    /// For one-time discoveries: remembered in the save so each pays once.
+    var id: String
+    var title: String
+    var coins: Int
+    var once: Bool
+}
+
 /// World-specific systems layered on top of the base flight game. World 1 has none.
 protocol WorldRuntime: AnyObject {
     var root: SCNNode { get }
@@ -22,6 +31,20 @@ protocol WorldRuntime: AnyObject {
     func constrainCamera(bird: SIMD3<Float>, cam: SIMD3<Float>) -> SIMD3<Float>
     func autopilot(_ flight: FlightModel) -> (roll: Float, pitch: Float)?
     func configure(_ rings: RingCourse)
+    /// Collisions for birds other than the player (bots): no penalties or sounds.
+    func constrainQuietly(_ flight: FlightModel)
+    /// Bots: a safer point to head for than `goal` when something solid is in the way (nil = fly straight at it).
+    func avoid(_ flight: FlightModel, goal: SIMD3<Float>) -> SIMD3<Float>?
+    /// Things worth telling the player about ("Dino fight below!"), collected since the last call.
+    func drainNotices() -> [String]
+    /// Where the camera was last frame (detail near it).
+    func setCamera(_ p: SIMD3<Float>)
+    /// 0 out in the open … 1 deep underground (dims the sun and closes the haze in).
+    var underground: Float { get }
+    /// Rewards earned since the last call.
+    func drainRewards() -> [WorldReward]
+    /// Camera shake asked for since the last call (big footsteps, fights, slams), 0…1.
+    func drainShake() -> Float
 }
 
 extension WorldRuntime {
@@ -29,6 +52,13 @@ extension WorldRuntime {
     func constrain(_ flight: FlightModel) -> Float { 0 }
     func constrainCamera(bird: SIMD3<Float>, cam: SIMD3<Float>) -> SIMD3<Float> { cam }
     func autopilot(_ flight: FlightModel) -> (roll: Float, pitch: Float)? { nil }
+    func constrainQuietly(_ flight: FlightModel) {}
+    func avoid(_ flight: FlightModel, goal: SIMD3<Float>) -> SIMD3<Float>? { nil }
+    func drainNotices() -> [String] { [] }
+    func setCamera(_ p: SIMD3<Float>) {}
+    var underground: Float { 0 }
+    func drainRewards() -> [WorldReward] { [] }
+    func drainShake() -> Float { 0 }
 }
 
 /// Spacing between repeated penalties so one blast doesn't drain you.

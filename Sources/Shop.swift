@@ -202,6 +202,17 @@ final class Progress {
         var worldsFlown: [String] = []
         var lanGames = 0
         var tutorialDone = false
+        // 0.4
+        /// One-time finds in the worlds (the subway, landmarks…), by id.
+        var discoveries: [String] = []
+        // 1.0
+        /// Ring Races finished without missing a ring.
+        var perfectRaces = 0
+        /// Watched the end of The Finale (and so was given the crown and the jetpack).
+        var finaleSeen = false
+        var jetpackOwned = false
+        /// The Finale was opened with the cheat code (the goals stay as they were, still there to earn).
+        var finaleByCode = false
 
         init() {}
         // Older saves don't have the newer fields; fill in defaults instead of failing.
@@ -232,6 +243,11 @@ final class Progress {
             worldsFlown = try c.decodeIfPresent([String].self, forKey: .worldsFlown) ?? []
             lanGames = try c.decodeIfPresent(Int.self, forKey: .lanGames) ?? 0
             tutorialDone = try c.decodeIfPresent(Bool.self, forKey: .tutorialDone) ?? false
+            discoveries = try c.decodeIfPresent([String].self, forKey: .discoveries) ?? []
+            perfectRaces = try c.decodeIfPresent(Int.self, forKey: .perfectRaces) ?? 0
+            finaleSeen = try c.decodeIfPresent(Bool.self, forKey: .finaleSeen) ?? false
+            jetpackOwned = try c.decodeIfPresent(Bool.self, forKey: .jetpackOwned) ?? false
+            finaleByCode = try c.decodeIfPresent(Bool.self, forKey: .finaleByCode) ?? false
         }
     }
 
@@ -287,12 +303,12 @@ final class Progress {
     // MARK: Worlds
 
     var world: WorldInfo { WorldCatalog.info(s.world) }
-    func ownsWorld(_ w: WorldInfo) -> Bool { s.worldsOwned.contains(w.id) }
+    func ownsWorld(_ w: WorldInfo) -> Bool { w.kind == .finale ? finaleUnlocked : s.worldsOwned.contains(w.id) }
     func stats(_ w: WorldInfo) -> WorldStats { s.worldStats[w.id] ?? WorldStats() }
 
     @discardableResult
     func buyWorld(_ w: WorldInfo) -> Bool {
-        guard !w.comingSoon, !ownsWorld(w), s.coins >= w.cost else { return false }
+        guard !w.comingSoon, !w.isFinale, !ownsWorld(w), s.coins >= w.cost else { return false }
         s.coins -= w.cost
         s.worldsOwned.append(w.id)
         s.world = w.id
@@ -477,6 +493,27 @@ final class Progress {
 
     func grant(_ c: Int) { s.coins += c; s.coinsEarned += c; save() }
 
+    // MARK: Discoveries
+
+    var discoveries: Int { s.discoveries.count }
+    func discovered(_ id: String) -> Bool { s.discoveries.contains(id) }
+
+    /// A find in a world (a token, a hidden place). One-time finds pay once, ever. Returns the coins paid, or nil
+    /// when it was already found.
+    func claim(_ r: WorldReward, world: String) -> Int? {
+        if r.once {
+            guard !s.discoveries.contains(r.id) else { return nil }
+            s.discoveries.append(r.id)
+        }
+        s.coins += r.coins
+        s.coinsEarned += r.coins
+        var st = s.worldStats[world] ?? WorldStats()
+        st.coins += r.coins
+        s.worldStats[world] = st
+        if r.once { save() } else { saveQuietly() }
+        return r.coins
+    }
+
     // MARK: Cosmetics
 
     var outfit: Outfit { s.outfit }
@@ -566,7 +603,56 @@ final class Progress {
         case .birdsOwned: return Double(Catalog.playable.filter(owns).count)
         case .cosmeticsOwned: return Double(s.cosmetics.count)
         case .distanceKm: return s.distance / 1000
+        case .secrets: return Double(WorldCatalog.secrets.keys.reduce(0) { $0 + secretsFound($1) })
+        case .citySecrets: return Double(secretsFound("city"))
+        case .dinoSecrets: return Double(secretsFound("dino"))
+        case .westSecrets: return Double(secretsFound("west"))
+        case .bestStreak: return Double(s.worldStats.values.map(\.bestStreak).max() ?? 0)
+        case .maxedBirds:
+            return Double(Catalog.playable.filter { sp in owns(sp) && BirdStat.allCases.allSatisfy { upgradeCost(sp, $0) == nil } }.count)
+        case .coinsEarned: return Double(s.coinsEarned)
+        case .perfectRaces: return Double(s.perfectRaces)
+        case .racesFinished: return Double(s.racesFinished)
         }
+    }
+
+    // MARK: The Finale
+
+    /// Every goal done (bonus goals aside): The Finale is open.
+    var finaleUnlocked: Bool { s.finaleByCode || GoalCatalog.required.allSatisfy { s.goalsDone.contains($0.id) } }
+    /// The cheat code: The Finale opens without the goals (they're left alone, rewards and all).
+    func openFinaleByCode() { s.finaleByCode = true; save() }
+    var requiredGoalsDone: Int { GoalCatalog.required.filter { s.goalsDone.contains($0.id) }.count }
+    var finaleSeen: Bool { s.finaleSeen }
+    var jetpackOwned: Bool { s.jetpackOwned }
+
+    /// The crowning, part way through the cutscene: the crown is yours and on your head.
+    func awardCrown() {
+        if !s.cosmetics.contains("skycrown") { s.cosmetics.append("skycrown") }
+        s.outfit[.hat] = "skycrown"
+        save()
+    }
+
+    /// The end of The Finale: the crown goes on, the jetpack is yours.
+    func finishFinale() {
+        s.finaleSeen = true
+        s.jetpackOwned = true
+        if !s.cosmetics.contains("skycrown") { s.cosmetics.append("skycrown") }
+        s.outfit[.hat] = "skycrown"
+        save()
+    }
+
+    func recordPerfectRace() { s.perfectRaces += 1; save() }
+
+    /// Tests: mark goals done without playing them.
+    func debugCompleteGoals(_ ids: [String]) {
+        for id in ids where !s.goalsDone.contains(id) { s.goalsDone.append(id) }
+        save()
+    }
+
+    /// How many of a world's secrets have been found.
+    func secretsFound(_ world: String) -> Int {
+        (WorldCatalog.secrets[world] ?? []).filter { s.discoveries.contains($0) }.count
     }
 
     func isDone(_ g: Goal) -> Bool { s.goalsDone.contains(g.id) }

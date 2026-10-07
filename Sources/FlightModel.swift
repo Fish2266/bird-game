@@ -34,6 +34,12 @@ final class FlightModel {
     private var wobblePhase: Float = 0
     /// Extra upward air (thermals over lava, etc.), m/s.
     var externalLift: Float = 0
+    /// The jetpack is burning. It pushes harder the longer it burns and there's no top speed; after it goes out the
+    /// bird coasts for a few seconds before the air catches it again.
+    var jet = false
+    /// Seconds it has been burning; 1 → 0 as the coast runs out.
+    private(set) var jetBurn: Float = 0
+    private(set) var jetCoast: Float = 0
 
     var tuning = FlightTuning()
     static let g: Float = 9.81
@@ -49,7 +55,7 @@ final class FlightModel {
 
     func reset(at p: SIMD3<Float>, yaw y: Float) {
         pos = p; yaw = y; pitch = -0.05; roll = 0; speed = 17; verticalBoost = 0
-        knockVel = .zero; wobble = 0; externalLift = 0
+        knockVel = .zero; wobble = 0; externalLift = 0; jetBurn = 0; jetCoast = 0
     }
 
     /// Shove the bird (lava blast, bullet, wall) — it tumbles a little and loses some speed.
@@ -68,6 +74,9 @@ final class FlightModel {
     func step(_ dt: Float, _ input: FlightInput) -> FlightEvents {
         var ev = FlightEvents()
         let g = Self.g
+        let start = pos
+        if jet { jetBurn += dt; jetCoast = 1 } else { jetBurn = 0; jetCoast = max(0, jetCoast - dt / JetpackTuning.coast) }
+        let jetting = jet || jetCoast > 0
         let flap = (input.flapL + input.flapR) * 0.5
         let spread = 1 - input.tuck
         flapEffort += (flap - flapEffort) * approach(2.2, dt)
@@ -84,7 +93,7 @@ final class FlightModel {
         roll += (rollTarget - roll) * approach((4.2 + min(speed, 40) * 0.04) * t.rollRate, dt)
 
         // --- Coordinated turn: yaw rate from bank angle.
-        let v = max(speed, 7)
+        let v = jetting ? min(max(speed, 7), JetpackTuning.turnSpeed) : max(speed, 7)
         let turn = -g * tan(clamp(roll, -1.3, 1.3)) / v
         yaw += clamp(turn, -2.2, 2.2) * dt * 1.15 * t.turn
 
@@ -98,18 +107,25 @@ final class FlightModel {
         let stallSpeed: Float = 8.5 - t.stallDrop - min(flapEffort * 1.5, 1.2) * 4.5
         stalled = smoothstep(stallSpeed + 1.5, stallSpeed - 2, speed) * spread
         if stalled > 0 { pTarget = lerp(pTarget, min(pTarget, -0.55), stalled) }
-        // Thin air above ~700 m.
-        if pos.y > 700 { pTarget = min(pTarget, lerp(0.6, -0.2, smoothstep(700, 900, pos.y))) }
+        // Thin air above ~700 m (unless there's a jetpack burning).
+        if pos.y > 700 && !jet { pTarget = min(pTarget, lerp(0.6, -0.2, smoothstep(700, 900, pos.y))) }
         pTarget = clamp(pTarget, -1.45, 1.1)
         let pitchRate: Float = input.tuck > 0.3 ? 3.2 : 2.6
         pitch += (pTarget - pitch) * approach(pitchRate, dt)
 
         // --- Speed: gravity along the flight path, drag, flap thrust.
-        let cd = 0.0011 * t.diveDrag + 0.0026 * spread * t.glideDrag + max(0, input.pitch - 0.85) * 0.01
+        // The jetpack punches clean through the air: no drag at all while it burns (so there's no top speed), and the
+        // air only takes hold again gradually as you coast after it goes out.
+        let cd = (0.0011 * t.diveDrag + 0.0026 * spread * t.glideDrag + max(0, input.pitch - 0.85) * 0.01) * (jet ? 0 : 1 - 0.985 * jetCoast)
         let thrust = flap * 13 * t.thrust * clamp(1.15 - speed / (55 * t.thrust), 0.15, 1)
         thrustNow = thrust
-        let accel = -g * sin(pitch) - cd * speed * speed + thrust + t.diveAccel * input.tuck
-        speed = clamp(speed + accel * dt, 3, t.maxSpeed)
+        let jetThrust: Float = jet ? JetpackTuning.thrust + JetpackTuning.build * jetBurn : 0
+        let accel = -g * sin(pitch) - cd * speed * speed + thrust + t.diveAccel * input.tuck + jetThrust
+        var next = speed + accel * dt
+        // No top speed with the jetpack; without it you can't gain past your bird's, but speed above it bleeds off
+        // (it isn't chopped).
+        if !jetting && next > t.maxSpeed { next = min(next, max(t.maxSpeed, speed)) }
+        speed = max(3, next)
 
         // --- Extra direct lift from flapping (lets you climb out of a slow hover).
         let lowSpeed = smoothstep(18, 6, speed)
@@ -125,18 +141,29 @@ final class FlightModel {
         }
 
         // --- Ground & water: forgiving skid instead of a crash.
-        let ground = max(TerrainShape.height(pos.x, pos.z), TerrainShape.waterLevel)
+        let ground = TerrainShape.collisionGround(pos.x, pos.z, pos.y)
         let clearance: Float = 0.9
         if pos.y < ground + clearance {
-            let into = max(0, -velocity.y)
+            // Down a subway's stairs the floor slopes: skim along it instead of bouncing off every step.
+            var slope: Float = 0
+            if ground < TerrainShape.height(pos.x, pos.z) - 0.5 {
+                let ahead = TerrainShape.collisionGround(pos.x - sin(yaw) * 0.6, pos.z - cos(yaw) * 0.6, pos.y)
+                if abs(ahead - ground) < 0.6 { slope = atan2(ahead - ground, 0.6) }
+            }
+            let into = max(0, -velocity.y + speed * sin(slope))
             pos.y = ground + clearance
-            if pitch < 0.08 {
+            if pitch < slope + 0.08 {
                 ev.groundImpact = into
-                pitch = max(pitch, 0.12)
+                pitch = max(pitch, slope + 0.12)
                 speed *= into > 6 ? 0.75 : 0.985
             }
             verticalBoost = max(verticalBoost, 0)
-            ev.waterSkim = TerrainShape.height(pos.x, pos.z) < TerrainShape.waterLevel
+            ev.waterSkim = TerrainShape.collisionHeight(pos.x, pos.z, pos.y) < TerrainShape.waterLevel
+        }
+        // Whatever happens (an absurd jetpack burn), never let the numbers run away.
+        if !pos.x.isFinite || !pos.y.isFinite || !pos.z.isFinite || !speed.isFinite {
+            pos = start.x.isFinite ? start : SIMD3(0, 200, 0)
+            speed = 40; jetBurn = 0; knockVel = .zero
         }
         return ev
     }

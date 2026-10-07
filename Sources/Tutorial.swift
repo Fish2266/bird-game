@@ -81,7 +81,7 @@ enum MenuTour {
         MenuTourStop(part: .tabArea, tab: .style, title: "Style",
                      text: "Hats, glasses, scarves, trails and paint jobs. Click anything to try it on before you buy it."),
         MenuTourStop(part: .tabArea, tab: .worlds, title: "Worlds",
-                     text: "Unlock the Volcano, the Glow Caves and Dogfight. They're harder, and pay more."),
+                     text: "Unlock more worlds: the Volcano, Glow Caves, Dogfight, Skyline City, Dino Valley and the Wild West. Each has its own dangers, and secrets to find."),
         MenuTourStop(part: .tabArea, tab: .goals, title: "Goals",
                      text: "Goals earn bonus coins and special outfits you can't buy anywhere else."),
         MenuTourStop(part: .tabArea, tab: .lan, title: "Play with friends",
@@ -665,6 +665,14 @@ final class WelcomeView: NSView {
            saved["version"] as? String == version, let notes = saved["notes"] as? [String], !notes.isEmpty {
             return Array(notes.prefix(6))
         }
+        if version.hasPrefix("1.0") {
+            return ["Three new worlds: Skyline City, Dino Valley and the Wild West",
+                    "A new title screen",
+                    "Secrets to find in every new world, and a Dino Hood and a Sheriff's Star to earn",
+                    "15 tough new goals. Finish every goal and something opens…",
+                    "Races and fights on every new map, each with its own obstacles",
+                    "Smoother cliffs everywhere, and lots of fixes"]
+        }
         if version.hasPrefix("0.3") {
             return ["Style: hats, glasses, scarves, trails and paint jobs (Esc \u{2192} Style)",
                     "Two new birds: the Hummingbird and the Snowy Owl",
@@ -714,7 +722,8 @@ final class WelcomeView: NSView {
             text.align = .left
             primary.title = "Got it"
             secondary.title = "Try the tutorial"
-            hint.text = v.hasPrefix("0.3") ? "Coin rewards were rebalanced, so every mode pays fairly." : ""
+            hint.text = v.hasPrefix("0.3") ? "Coin rewards were rebalanced, so every mode pays fairly."
+                : v.hasPrefix("1.0") ? "Unlock the new worlds in the menu (Esc → Worlds). Each one hides secrets to find." : ""
             bird.figure = .done
         }
         if case .whatsNew = kind {

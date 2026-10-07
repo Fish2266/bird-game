@@ -358,7 +358,7 @@ final class StylePanel: FlippedView {
     func show(slot s: CosmeticSlot) {
         slot = s
         slots.selected = CosmeticSlot.allCases.firstIndex(of: s) ?? 0
-        let items = CosmeticCatalog.items(s)
+        let items = CosmeticCatalog.items(s).filter { !$0.secret || progress.ownsCosmetic($0) }
         while cards.count < items.count {
             let c = CosmeticCardView(items[0])
             addSubview(c)
@@ -474,6 +474,7 @@ final class GoalRowView: FlippedView {
     init(_ g: Goal) {
         goal = g
         super.init(frame: .zero)
+        toolTip = g.detail
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -507,31 +508,44 @@ final class GoalRowView: FlippedView {
         let needed = Wii.attributed(reward, font: Wii.font(12.5, bold: true), color: Wii.text, align: .left).size().width + 8
         let rewardW = min(needed, (r.maxX - tx) * 0.55)
         Wii.drawText(goal.title, in: NSRect(x: tx, y: r.minY + 7, width: r.maxX - tx - rewardW - 16, height: 18), size: 13.5, bold: true, truncate: true)
-        Wii.drawText(goal.detail, in: NSRect(x: tx, y: r.minY + 26, width: r.maxX - tx - 110, height: 16), size: 12, color: Wii.textSoft, truncate: true)
         Wii.drawText(reward, in: NSRect(x: r.maxX - rewardW - 10, y: r.minY + 7, width: rewardW, height: 18), size: 12.5, bold: true,
                      color: goal.cosmetic != nil ? Rarity.earned.color : Wii.text, align: .right, truncate: true)
-        if !done {
+        // Progress (or Done) on the right; the description gets all the room that leaves.
+        let status: String
+        if done {
+            status = "Done"
+        } else {
             let shownValue = goal.metric == .distanceKm ? String(format: "%.1f", min(value, goal.target)) : "\(Int(min(value, goal.target)))"
             let target = goal.metric == .distanceKm ? "\(Int(goal.target)) km" : (goal.metric == .topSpeed ? "\(Int(goal.target)) km/h" : "\(Int(goal.target))")
-            Wii.drawText("\(shownValue) / \(target)", in: NSRect(x: r.maxX - 110, y: r.minY + 26, width: 100, height: 16), size: 11,
-                         color: Wii.textSoft, align: .right)
-        } else {
-            Wii.drawText("Done", in: NSRect(x: r.maxX - 110, y: r.minY + 26, width: 100, height: 16), size: 11, bold: true,
-                         color: NSColor(srgbRed: 0.25, green: 0.6, blue: 0.35, alpha: 1), align: .right)
+            status = "\(shownValue) / \(target)"
         }
+        let statusW = Wii.attributed(status, font: Wii.font(11, bold: done), color: Wii.textSoft, align: .right).size().width
+        Wii.drawText(goal.bonus ? "Bonus · " + goal.detail : goal.detail, in: NSRect(x: tx, y: r.minY + 26, width: r.maxX - tx - statusW - 22, height: 16),
+                     size: 12, color: Wii.textSoft, truncate: true)
+        Wii.drawText(status, in: NSRect(x: r.maxX - 110, y: r.minY + 26, width: 100, height: 16), size: 11, bold: done,
+                     color: done ? NSColor(srgbRed: 0.25, green: 0.6, blue: 0.35, alpha: 1) : Wii.textSoft, align: .right)
     }
 }
 
 final class GoalsPanel: FlippedView {
     let progress: Progress
     private var rows: [GoalRowView] = []
+    /// There are more goals than fit: they scroll.
+    private let scroll = NSScrollView()
+    private let content = FlippedView()
 
     init(progress: Progress) {
         self.progress = progress
         super.init(frame: .zero)
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.documentView = content
+        addSubview(scroll)
         for g in GoalCatalog.all {
             let r = GoalRowView(g)
-            addSubview(r)
+            content.addSubview(r)
             rows.append(r)
         }
     }
@@ -544,10 +558,19 @@ final class GoalsPanel: FlippedView {
         }
     }
 
+    /// Test hook: scroll to the bottom of the list.
+    func debugScrollToEnd() {
+        layoutSubtreeIfNeeded()
+        content.scroll(NSPoint(x: 0, y: max(0, content.frame.height - scroll.contentView.bounds.height)))
+    }
+
     override func layout() {
         super.layout()
-        let colW = (bounds.width - 12) / 2
-        let rowH = min(62, bounds.height / CGFloat((rows.count + 1) / 2))
+        scroll.frame = bounds
+        let colW = (bounds.width - 12 - 10) / 2
+        let rowH: CGFloat = 58
+        let h = CGFloat((rows.count + 1) / 2) * rowH
+        content.frame = NSRect(x: 0, y: 0, width: bounds.width - 10, height: max(h, bounds.height))
         for (i, r) in rows.enumerated() {
             r.frame = NSRect(x: CGFloat(i % 2) * (colW + 12), y: CGFloat(i / 2) * rowH, width: colW, height: rowH)
         }

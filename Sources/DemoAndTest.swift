@@ -78,7 +78,8 @@ func steerToward(_ g: Game, _ p: SIMD3<Float>, phase: inout Float, dt: Float) ->
     let ground = TerrainShape.ground(g.flight.pos.x, g.flight.pos.z)
     if g.flight.pos.y - ground < 4 { i.pitch = max(i.pitch, 0.6) }
     phase += dt * 2 * .pi * 1.7
-    if g.flight.speed < 22 || above > 6 { let down: Float = cos(phase) < 0 ? 0.95 : 0; i.flapL = down; i.flapR = down }
+    // (Not while diving at something well below: flapping there just holds the bird up.)
+    if (g.flight.speed < 22 && above > -4) || above > 6 { let down: Float = cos(phase) < 0 ? 0.95 : 0; i.flapL = down; i.flapR = down }
     return i
 }
 
@@ -242,6 +243,7 @@ enum AudioTest {
         var elevPrev: Float = 0
         var chimed = false, splashed = false
         var phases: [(Float, String)] = []
+        let scene = ProcessInfo.processInfo.environment["AUDIO_SCENE"] ?? ""
         func phase(_ t: Float) -> String {
             switch t {
             case ..<2: return "glide 15 m/s"
@@ -273,6 +275,20 @@ enum AudioTest {
             synth.wingDown = (max(0, -vel), max(0, -vel)); synth.wingUp = (max(0, vel), max(0, vel))
             if t > 6 && !chimed { synth.chime(); chimed = true }
             if t > 15.2 && !splashed { synth.impact(9, water: true); splashed = true }
+            if scene == "city" {
+                // The city around the flight: traffic all along, voices early, the el, the chopper, a siren, horns.
+                synth.cityTraffic = 0.6
+                synth.cityCrowd = t < 6 ? 0.6 : 0
+                synth.cityTrain = t > 6 && t < 10 ? 0.8 : 0
+                synth.cityHeli = t > 8 && t < 14 ? 0.8 : 0
+                synth.sirenGain = t > 10 && t < 16 ? 0.7 : 0
+                func once(_ at: Float, _ f: () -> Void) { if t >= at && t - dt < at { f() } }
+                once(2) { synth.shutter() }
+                once(3) { synth.horn(gain: 1, pan: -0.5) }
+                once(3.3) { synth.horn(gain: 0.8, pan: 0.4) }
+                once(5) { synth.flutter() }
+                once(7) { synth.trainHorn() }
+            }
             let m = min(blk, n - i)
             L.withUnsafeMutableBufferPointer { lb in
                 R.withUnsafeMutableBufferPointer { rb in synth.render(lb.baseAddress! + i, rb.baseAddress! + i, m) }
@@ -281,7 +297,13 @@ enum AudioTest {
             if phases.last?.1 != phase(t) { phases.append((t, phase(t))) }
         }
 
-        // WAV (16-bit stereo)
+        writeWAV(L, R, sr: sr, path: path)
+        bandTable(L, R, sr: sr, phases: phases, phase: phase)
+    }
+
+    /// 16-bit stereo WAV.
+    static func writeWAV(_ L: [Float], _ R: [Float], sr: Float, path: String) {
+        let n = L.count
         var data = Data()
         func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
         func u16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
@@ -293,6 +315,10 @@ enum AudioTest {
             u16(UInt16(bitPattern: Int16(clamp(R[k], -1, 1) * 32767)))
         }
         try? data.write(to: URL(fileURLWithPath: path))
+    }
+
+    private static func bandTable(_ L: [Float], _ R: [Float], sr: Float, phases: [(Float, String)], phase: (Float) -> String) {
+        let n = L.count
 
         // Band analysis with the same filters the synth uses.
         let bands: [Float] = [50, 120, 300, 700, 1500, 3000, 6000]
@@ -338,7 +364,8 @@ enum WorldShots {
     static func run(dir: String) {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let size = CGSize(width: 560, height: 800)
-        for id in [WorldID.meadow, .volcano, .caves, .dogfight] {
+        let only = ProcessInfo.processInfo.environment["SHOT_WORLDS"]?.split(separator: ",").compactMap { WorldID(rawValue: String($0)) }
+        for id in only ?? [WorldID.meadow, .volcano, .caves, .dogfight, .city, .dino, .west, .finale] {
             let game = Game(controls: SharedControls(), world: id, terrainRadius: 6)
             game.synchronousTerrain = true
             let renderer = SCNRenderer(device: MTLCreateSystemDefaultDevice(), options: nil)
@@ -410,6 +437,102 @@ enum WorldShots {
                     let cam = game.runtime!.constrainCamera(bird: bird(), cam: bird() - flat * 7 + SIMD3(0, 2.2, 0))
                     game.cameraNode.simdPosition = cam
                     game.cameraNode.simdLook(at: bird() + flat * 30 + SIMD3(0, 1, 0), up: kUp, localFront: SIMD3(0, 0, -1))
+                }
+            }
+            if [WorldID.city, .dino, .west, .finale].contains(id) {
+                // Clean pictures: no rings, and the bird flying straight and level (not circling on autopilot).
+                game.rings.root.isHidden = true
+                game.debugSteer = { g in
+                    var i = FlightInput()
+                    i.pitch = clamp(-g.flight.pitch * 2.5, -1, 1)
+                    i.roll = clamp(-g.flight.roll * 2, -1, 1)
+                    return i
+                }
+            }
+            if id == .city {
+                // Down an avenue between the towers, from the spawn.
+                let (p, yaw) = game.spawn
+                game.flight.reset(at: p - SIMD3<Float>(0, 12, 0), yaw: yaw)
+                game.flight.speed = 16
+                step(20)
+            }
+            // A Brachiosaurus out in the open (no trees between it and the camera).
+            let openNeck: Dino? = (game.runtime as? DinoRuntime).flatMap { rt in
+                guard let t = game.terrain.terrain as? DinoTerrain else { return nil }
+                let standing: [Dino.Mind] = [.graze, .wander, .roam, .rest, .alert]
+                return rt.life.dinos.filter { $0.kind == .longneck && standing.contains($0.mind) && simd_distance($0.position, bird()) < 700 }.min { a, b in
+                    func cover(_ d: Dino) -> Float {
+                        var f: Float = 0
+                        for k in 0..<8 {
+                            let ang = Float(k) / 8 * 2 * .pi
+                            f += t.forest(d.pos.x + cos(ang) * 35, d.pos.y + sin(ang) * 35)
+                        }
+                        return f + t.forest(d.pos.x, d.pos.y) * 2
+                    }
+                    return cover(a) < cover(b)
+                }
+            }
+            if id == .dino, let neck = openNeck, let t = game.terrain.terrain as? DinoTerrain {
+                // Coming in toward a Brachiosaurus from the clearest side.
+                var to = SIMD3<Float>(0, 0, -1), bestCover = Float.infinity
+                for k in 0..<12 {
+                    let ang = Float(k) / 12 * 2 * .pi
+                    let d = SIMD3<Float>(cos(ang), 0, sin(ang))
+                    var c: Float = 0
+                    for r: Float in [12, 24, 36, 48, 60] { c += max(0, t.forest(neck.position.x - d.x * r, neck.position.z - d.z * r)) }
+                    if c < bestCover { bestCover = c; to = d }
+                }
+                var start = neck.position - to * 75
+                start.y = max(TerrainShape.ground(start.x, start.z), neck.ground) + 32
+                game.flight.reset(at: start, yaw: atan2(-to.x, -to.z))
+                game.flight.speed = 14
+                step(10)
+                compose = {
+                    let target = neck.position + SIMD3<Float>(0, neck.sp.hip * neck.scale * 1.1, 0)
+                    let dir = simd_normalize(SIMD3(target.x - bird().x, 0, target.z - bird().z))
+                    game.cameraNode.simdPosition = bird() - dir * 9 + SIMD3<Float>(0, 4, 0)
+                    game.cameraNode.simdLook(at: target, up: kUp, localFront: SIMD3<Float>(0, 0, -1))
+                }
+            }
+            if id == .west, let t = game.terrain.terrain as? WestTerrain {
+                // Down in the great canyon, flying along it between the layered walls.
+                let sp = game.spawn.0
+                var river: SIMD3<Float>?
+                search: for r in stride(from: Float(0), to: 4000, by: 40) {
+                    for k in 0..<max(1, Int(r / 30)) {
+                        let a = Float(k) / Float(max(1, Int(r / 30))) * 2 * .pi
+                        let q = sp + SIMD3<Float>(cos(a), 0, sin(a)) * r
+                        if WestLayout.canyonDistances(q.x, q.z).0 < 20 && t.height(q.x, q.z) < 0 { river = SIMD3(q.x, 0, q.z); break search }
+                    }
+                }
+                if let rv = river {
+                    let e: Float = 4
+                    let f0 = WestLayout.fields(rv.x, rv.z).0
+                    var across = SIMD3<Float>(WestLayout.fields(rv.x + e, rv.z).0 - f0, 0, WestLayout.fields(rv.x, rv.z + e).0 - f0)
+                    across = simd_length(across) > 1e-9 ? simd_normalize(across) : SIMD3<Float>(1, 0, 0)
+                    let along = SIMD3<Float>(-across.z, 0, across.x)
+                    game.terrain.update(center: rv, synchronous: true)
+                    game.flight.reset(at: rv + SIMD3<Float>(0, 95, 0), yaw: atan2(-along.x, -along.z))
+                    game.flight.speed = 16
+                    step(10)
+                    compose = {
+                        let f = fwd()
+                        game.cameraNode.simdPosition = bird() - f * 9 + SIMD3<Float>(0, 2.4, 0)
+                        game.cameraNode.simdLook(at: bird() + f * 60 - SIMD3<Float>(0, 14, 0), up: kUp, localFront: SIMD3<Float>(0, 0, -1))
+                    }
+                }
+            }
+            if id == .finale {
+                // Flying in to the castle from the south: the walls and towers ahead, the Sky Tower behind them.
+                let gy = FinaleLayout.ground
+                let target = SIMD3<Float>(0, gy + 34, -50)
+                game.flight.reset(at: SIMD3<Float>(-10, gy + 30, 235), yaw: 0)
+                game.flight.speed = 14
+                step(10)
+                compose = {
+                    let dir = simd_normalize(SIMD3(target.x - bird().x, 0, target.z - bird().z))
+                    game.cameraNode.simdPosition = bird() - dir * 8 + SIMD3<Float>(1.2, 2.4, 0)
+                    game.cameraNode.simdLook(at: target, up: kUp, localFront: SIMD3<Float>(0, 0, -1))
                 }
             }
             game.cameraNode.camera?.fieldOfView = 62
@@ -871,7 +994,7 @@ enum Gallery {
                 try? png.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
             }
         }
-        for world in [WorldID.meadow, .volcano, .caves, .dogfight] where only == nil || only == world {
+        for world in WorldID.allCases where only == nil || only == world {
             for mode in [GameMode.ringRace, .speedRace] {
                 let g = Game(controls: SharedControls(), world: world, mode: mode, terrainRadius: 5)
                 g.synchronousTerrain = true
@@ -899,6 +1022,8 @@ enum Gallery {
                     let f = PathFrame(p, track.tangent(at: max(0, s - back)))
                     var v = f.at(side, 0, up)
                     if world == .caves { v = f.at(0, 0, 2) }
+                    // Between buildings: stay on the street's centre line.
+                    if world == .city { v = f.at(0, 0, 5) }
                     return v
                 }
                 shoot(track.point(atArc: 0), from: view(atArc: 0, back: 40), "start")
@@ -1013,8 +1138,10 @@ enum ScenarioTest {
         g.synchronousTerrain = true
         let track = g.track!
         g.debugSteer = { g in
-            let target = g.nextGate < track.gates.count && simd_distance(track.gates[g.nextGate].center, g.flight.pos) < 60
+            var target = g.nextGate < track.gates.count && simd_distance(track.gates[g.nextGate].center, g.flight.pos) < 60
                 ? track.gates[g.nextGate].center : track.point(atArc: min(g.progressS + 45, track.length))
+            // Follow dips (down to a barn door) closer in than the turns.
+            target.y = min(target.y, track.point(atArc: min(g.progressS + 18, track.length)).y)
             return steerToward(g, target, phase: &phase, dt: 1.0 / 60)
         }
         var outcome: MatchOutcome?
@@ -1174,7 +1301,21 @@ enum PerfTest {
             }
             // From here on, terrain streams in the background like in the real game.
             g.synchronousTerrain = false
+            if let hide = ProcessInfo.processInfo.environment["PERF_HIDE"] {
+                // Experiments: hide a kind of node to see what the frame costs.
+                g.scene.rootNode.enumerateHierarchy { n, _ in
+                    guard let m = n.geometry?.firstMaterial else { return }
+                    let facade = m === CityShaders.facade, glow = m === CityShaders.signals
+                    if hide.contains("facade") && facade { n.isHidden = true }
+                    if hide.contains("glow") && glow { n.isHidden = true }
+                    if hide.contains("terrain") && n.parent === g.terrain.root { n.geometry = nil }
+                    if hide.contains("props") && !facade && !glow && n.parent?.parent === g.terrain.root { n.isHidden = true }
+                }
+                if hide.contains("shadow") { g.sun.light?.castsShadow = false }
+                if hide.contains("life"), let rt = g.runtime as? CityRuntime { rt.life.root.isHidden = true }
+            }
             var times: [Double] = [], maxProj = 0
+            var simTotal: Double = 0
             let frames = Int(seconds * 60)
             for _ in 0..<frames {
                 if attack { g.keys.attack = true; g.fighter.shield = 99; g.fighter.health = Fighter.maxHealth }
@@ -1186,6 +1327,7 @@ enum PerfTest {
                 _ = r.snapshot(atTime: t, with: CGSize(width: 1280, height: 800), antialiasingMode: .multisampling4X)
                 let t2 = CACurrentMediaTime()
                 times.append((t2 - t0) * 1000)
+                simTotal += (t1 - t0) * 1000
                 if (t2 - t0) * 1000 > 18 && ProcessInfo.processInfo.environment["PERF_VERBOSE"] != nil {
                     print(String(format: "   spike at %.2f s: update %.1f ms, render %.1f ms, projectiles %d→%d", t, (t1 - t0) * 1000,
                                  (t2 - t1) * 1000, before, g.combat.activeCount))
@@ -1199,8 +1341,15 @@ enum PerfTest {
             }
             let sorted = times.sorted()
             let avg = times.reduce(0, +) / Double(times.count)
-            print(String(format: "%-30@ avg %5.1f ms   p95 %5.1f   worst %5.1f   frames over 33 ms: %d   max projectiles %d",
-                         label as NSString, avg, sorted[Int(Double(sorted.count) * 0.95)], sorted.last!, times.filter { $0 > 33 }.count, maxProj))
+            print(String(format: "%-30@ avg %5.1f ms (sim %4.1f)   p95 %5.1f   worst %5.1f   frames over 33 ms: %d   max projectiles %d",
+                         label as NSString, avg, simTotal / Double(times.count), sorted[Int(Double(sorted.count) * 0.95)], sorted.last!,
+                         times.filter { $0 > 33 }.count, maxProj))
+        }
+        if let name = ProcessInfo.processInfo.environment["PERF_WORLD"], let w = WorldID(rawValue: name) {
+            measure("\(name) free flight", .freeRoam, attack: false, world: w)
+            BotSettings.count = 5
+            measure("\(name) fight, 5 dressed", .pvp, attack: true, dressed: true, world: w)
+            return
         }
         measure("free flight", .freeRoam, attack: false)
         measure("free flight, dressed up", .freeRoam, attack: false, dressed: true)
@@ -1210,6 +1359,8 @@ enum PerfTest {
         measure("fight, 5 bots, all dressed", .pvp, attack: true, dressed: true)
         measure("caves fight, 5 dressed", .pvp, attack: true, dressed: true, world: .caves)
         measure("volcano free flight, dressed", .freeRoam, attack: false, dressed: true, world: .volcano)
+        measure("city free flight", .freeRoam, attack: false, world: .city)
+        measure("city fight, 5 dressed", .pvp, attack: true, dressed: true, world: .city)
         BotSettings.count = bots
     }
 }
@@ -1222,7 +1373,8 @@ enum EconomySim {
         func luckBonus(_ sp: Species) -> Float { 0.6 + 0.08 * Float(sp.base[BirdStat.luck.rawValue]) }
         func perRing(_ sp: Species) -> Float { (5 * luckBonus(sp)).rounded() }
         print("FREE ROAM (\(Int(minutes)) min each, autopilot chasing rings)")
-        for world in [WorldID.meadow, .volcano, .caves, .dogfight] {
+        let only = ProcessInfo.processInfo.environment["ECON_WORLDS"].map { Set($0.split(separator: ",").compactMap { WorldID(rawValue: String($0)) }) }
+        for world in WorldID.allCases where only == nil || only!.contains(world) {
             for bird in ["gull", "phoenix"] {
                 let sp = Catalog.species(bird)
                 let g = Game(controls: SharedControls(), world: world, mode: .freeRoam, species: sp, points: sp.base, terrainRadius: 3)
@@ -1260,7 +1412,7 @@ enum EconomySim {
             }
         }
         print("RACES (gull, autopilot)")
-        for world in [WorldID.meadow, .volcano, .caves, .dogfight] {
+        for world in WorldID.allCases where only == nil || only!.contains(world) {
             for mode in [GameMode.ringRace, .speedRace] {
                 let sp = Catalog.species("gull")
                 let g = Game(controls: SharedControls(), world: world, mode: mode, species: sp, points: sp.base, terrainRadius: 3)
@@ -1268,8 +1420,10 @@ enum EconomySim {
                 let track = g.track!
                 var phase: Float = 0
                 g.debugSteer = { g in
-                    let target = g.nextGate < track.gates.count && simd_distance(track.gates[g.nextGate].center, g.flight.pos) < 60
+                    var target = g.nextGate < track.gates.count && simd_distance(track.gates[g.nextGate].center, g.flight.pos) < 60
                         ? track.gates[g.nextGate].center : track.point(atArc: min(g.progressS + 45, track.length))
+                    // Follow dips (down to a barn door) closer in than the turns.
+                    target.y = min(target.y, track.point(atArc: min(g.progressS + 18, track.length)).y)
                     return steerToward(g, target, phase: &phase, dt: 1.0 / 60)
                 }
                 var out: MatchOutcome?
@@ -1659,7 +1813,8 @@ enum ObstacleShots {
     /// `--obstacle-shots <dir>`: close-ups of the obstacles, standing and floating, in each world.
     static func run(dir: String) {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        for world in [WorldID.meadow, .volcano, .dogfight, .caves] {
+        let only = ProcessInfo.processInfo.environment["OBST_WORLDS"]?.split(separator: ",").compactMap { WorldID(rawValue: String($0)) }
+        for world in [WorldID.meadow, .volcano, .dogfight, .caves, .dino, .west] where only == nil || only!.contains(world) {
             let g = Game(controls: SharedControls(), world: world, terrainRadius: 4)
             g.synchronousTerrain = true
             g.bird.node.isHidden = true
@@ -1688,6 +1843,19 @@ enum ObstacleShots {
                 ("barn", { Barn(frame: $0) }),
                 ("windmill", { Windmill(style: .farm, frame: $0, length: 12, phase: 0) }),
                 ("silos", { Pillars(style: .silo, frame: $0, count: 3, spacing: 30, offset: 6, radius: 4, top: $0.origin.y + 6) }),
+            ]
+            case .dino: items = [
+                ("ribs", { FossilRibs(frame: $0) }),
+                ("fallen", { FallenGiant(frame: $0) }),
+                ("steam", { SteamGeysers(frame: $0) }),
+                ("pteros", { PteroOrbit(frame: $0, phase: 0) }),
+            ]
+            case .west: items = [
+                ("sandarch", { SandArch(frame: $0) }),
+                ("hoodoos", { Hoodoos(frame: $0) }),
+                ("cartbridge", { CartBridge(frame: $0, phase: 0) }),
+                ("windpump", { Windpump(frame: $0) }),
+                ("trestle", { LowTrestle(frame: $0) }),
             ]
             default: items = [
                 ("crushers", { Crushers(frame: $0, terrain: terrain) }),

@@ -48,6 +48,8 @@ struct Cosmetic {
     let rarity: Rarity
     /// Goal that awards it (earned items can't be bought).
     var goal: String? = nil
+    /// Not shown anywhere until it's yours (the end of The Finale).
+    var secret = false
 
     var earned: Bool { goal != nil }
 }
@@ -68,9 +70,12 @@ enum CosmeticCatalog {
         Cosmetic(id: "unicorn", slot: .hat, name: "Unicorn Horn", blurb: "A pearly, spiralled horn.", cost: 500, rarity: .epic),
         Cosmetic(id: "crown", slot: .hat, name: "Crown", blurb: "Solid gold with real gems. For royalty only.", cost: 1200, rarity: .legendary),
         Cosmetic(id: "grad", slot: .hat, name: "Graduation Cap", blurb: "Proof you finished flight school.", cost: 0, rarity: .earned, goal: "tutorial"),
-        Cosmetic(id: "explorer", slot: .hat, name: "Explorer's Hat", blurb: "For flying in every world.", cost: 0, rarity: .earned, goal: "worlds"),
+        Cosmetic(id: "explorer", slot: .hat, name: "Explorer's Hat", blurb: "For flying in four different worlds.", cost: 0, rarity: .earned, goal: "worlds"),
         Cosmetic(id: "viking", slot: .hat, name: "Viking Helmet", blurb: "For beating the Hard bots.", cost: 0, rarity: .earned, goal: "fightHard"),
         Cosmetic(id: "halo", slot: .hat, name: "Halo", blurb: "Glows. For flying through 1,000 rings.", cost: 0, rarity: .earned, goal: "rings1000"),
+        Cosmetic(id: "dinohood", slot: .hat, name: "Dino Hood", blurb: "Rawr. For finding every secret in Dino Valley.", cost: 0, rarity: .earned, goal: "paleo"),
+        Cosmetic(id: "skycrown", slot: .hat, name: "Crown of the Sky", blurb: "Placed on your head by the King himself, at the end of everything.",
+                 cost: 0, rarity: .earned, goal: "finale", secret: true),
 
         // Glasses
         Cosmetic(id: "shades", slot: .eyes, name: "Sunglasses", blurb: "Classic black shades.", cost: 60, rarity: .common),
@@ -92,6 +97,7 @@ enum CosmeticCatalog {
         Cosmetic(id: "rainbowscarf", slot: .neck, name: "Rainbow Scarf", blurb: "Every colour, flapping in the breeze.", cost: 500, rarity: .epic),
         Cosmetic(id: "medal", slot: .neck, name: "Gold Medal", blurb: "For winning your first gold medal.", cost: 0, rarity: .earned, goal: "gold"),
         Cosmetic(id: "lei", slot: .neck, name: "Flower Lei", blurb: "For flying with friends over LAN.", cost: 0, rarity: .earned, goal: "lan"),
+        Cosmetic(id: "sheriff", slot: .neck, name: "Sheriff's Star", blurb: "For finding every secret in the Wild West.", cost: 0, rarity: .earned, goal: "sheriff"),
 
         // Trails
         Cosmetic(id: "contrails", slot: .trail, name: "Contrails", blurb: "White vapour streams off your wingtips.", cost: 100, rarity: .common),

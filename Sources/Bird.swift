@@ -244,6 +244,81 @@ final class BirdNode {
     /// Start the trail afresh (after a teleport).
     func resetTrail() { trail?.reset() }
 
+    // MARK: The jetpack, and walking (The Finale)
+
+    private var jetpack: JetpackRig?
+    var hasJetpack: Bool { jetpack != nil }
+
+    /// Strap the jetpack on (or take it off).
+    func setJetpack(_ on: Bool) {
+        if on, jetpack == nil {
+            let j = JetpackRig()
+            body.addChildNode(j.node)
+            jetpack = j
+        } else if !on, let j = jetpack {
+            j.node.removeFromParentNode()
+            jetpack = nil
+        }
+    }
+
+    /// 0 = out … 1 = full burn.
+    func jet(throttle: Float, time: Float, speed: Float) { jetpack?.update(throttle: throttle, time: time, speed: speed) }
+
+    private var legs: [SCNNode] = []
+    /// On its feet (walking or standing): wings closed along the body.
+    private var resting = false
+
+    /// Where a hat sits (world space) and the body's frame: the cutscene lands the crown and the jetpack on them.
+    var hatTransform: simd_float4x4 { headAnchor.simdWorldTransform }
+    var bodyTransform: simd_float4x4 { body.simdWorldTransform }
+
+    /// How far below the bird's centre its feet are when it stands (bird units, before any scaling of the node).
+    var standHeight: Float { (0.12 + 0.3) * 1.25 * look.size }
+
+    /// Walking (the end of The Finale): legs out, a waddle and a bob, the head nodding. nil = flying, legs away.
+    func walk(phase: Float?) {
+        if legs.isEmpty {
+            let legMat = Self.material(NSColor(srgbRed: 0.95, green: 0.62, blue: 0.22, alpha: 1), look: BirdLook(), pattern: nil)
+            for s: Float in [-1, 1] {
+                let hip = SCNNode()
+                hip.simdPosition = SIMD3(s * 0.055, -0.1, 0.05)
+                let shin = SCNNode(geometry: SCNCylinder(radius: 0.014, height: 0.3))
+                shin.geometry?.materials = [legMat]
+                shin.simdPosition = SIMD3(0, -0.15, 0)
+                hip.addChildNode(shin)
+                for a: Float in [-0.5, 0, 0.5] {
+                    let toe = SCNNode(geometry: SCNCapsule(capRadius: 0.011, height: 0.09))
+                    toe.geometry?.materials = [legMat]
+                    toe.simdPosition = SIMD3(sin(a) * 0.03, -0.3, -cos(a) * 0.035)
+                    toe.simdOrientation = simd_quatf(angle: -a, axis: SIMD3(0, 1, 0)) * simd_quatf(angle: .pi / 2, axis: SIMD3(1, 0, 0))
+                    hip.addChildNode(toe)
+                }
+                hip.isHidden = true
+                body.addChildNode(hip)
+                legs.append(hip)
+            }
+        }
+        resting = phase != nil
+        guard let ph = phase else {
+            for l in legs { l.isHidden = true }
+            body.simdPosition = .zero
+            body.simdOrientation = simd_quatf(angle: 0, axis: kUp)
+            head.simdPosition = look.headCenter
+            return
+        }
+        // Standing up like a perched bird (chest up, tail down), the legs kept upright under it.
+        let tilt: Float = 0.5
+        for (i, l) in legs.enumerated() {
+            l.isHidden = false
+            let swing = sin(ph + Float(i) * .pi) * 0.55
+            l.simdOrientation = simd_quatf(angle: swing - tilt, axis: SIMD3(1, 0, 0))
+        }
+        // A waddle: the body rocks side to side and bobs; the head nods forward with each step.
+        body.simdPosition = SIMD3(0, abs(sin(ph)) * 0.03, 0)
+        body.simdOrientation = simd_quatf(angle: sin(ph) * 0.07, axis: SIMD3(0, 0, 1)) * simd_quatf(angle: tilt, axis: SIMD3(1, 0, 0))
+        head.simdPosition = look.headCenter + SIMD3(0, 0.01 * cos(ph * 2), -0.025 * max(0, sin(ph * 2)))
+    }
+
     private var outline: [SCNNode] = []
 
     /// "Show location" glow: a see-through-walls shell in `color` around every part of the bird
@@ -455,8 +530,15 @@ final class BirdNode {
             let outerSweep = lerp(-0.1 - abs(bend[i]) * 0.35, -2.5, fold)
             elbow[i].simdOrientation = simd_quatf(angle: s * b, axis: SIMD3(0, 0, 1)) *
                 simd_quatf(angle: s * outerSweep, axis: SIMD3(0, 1, 0))
+            if resting {
+                // Standing or walking: the wings closed along the sides, tips back over the tail — folded short, the
+                // way a perched bird's are, not trailing a whole wingspan behind it.
+                shoulder[i].simdOrientation = simd_quatf(angle: s * -0.32, axis: SIMD3(0, 0, 1)) * simd_quatf(angle: s * -1.5, axis: SIMD3(0, 1, 0))
+                elbow[i].simdOrientation = simd_quatf(angle: s * -0.05, axis: SIMD3(0, 1, 0))
+            }
+            shoulder[i].simdScale = SIMD3(repeating: resting ? 0.6 : 1)
         }
-        tail.simdOrientation = simd_quatf(angle: -pitchIn * 0.35, axis: SIMD3(1, 0, 0)) *
+        tail.simdOrientation = simd_quatf(angle: -pitchIn * 0.35 + (resting ? 0.45 : 0), axis: SIMD3(1, 0, 0)) *
             simd_quatf(angle: rollIn * 0.25, axis: SIMD3(0, 0, 1))
         // Head stays level-ish, like a real bird's.
         head.simdOrientation = simd_quatf(angle: pitchIn * -0.15, axis: SIMD3(1, 0, 0))

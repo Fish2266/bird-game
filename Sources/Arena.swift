@@ -12,11 +12,13 @@ final class Arena {
     private let wall = SCNNode()
     private let material = SCNMaterial()
     private let caves: Bool
+    private let city: Bool
     /// Seconds before the wall starts to close, and how long it takes to reach its smallest size.
     static let holdTime: Float = 45, shrinkTime: Float = 100, minFraction: Float = 0.3
 
     init(spawn: SIMD3<Float>, world: WorldID) {
         caves = world == .caves
+        city = world == .city
         center = SIMD3(spawn.x, TerrainShape.ground(spawn.x, spawn.z), spawn.z)
         baseRadius = caves ? 170 : 330
         radius = baseRadius
@@ -121,6 +123,14 @@ final class Arena {
             let back = -d
             return (SIMD3(p.x, (s.floor + s.ceiling) * 0.5, p.y), atan2(-back.x, -back.y))
         }
+        if city {
+            // Down in a street canyon, facing along the street toward the middle.
+            let a = Float(slot) / Float(max(count, 2)) * 2 * .pi + 0.4
+            let p = Arena.onStreet(SIMD2(center.x + cos(a) * baseRadius * 0.5, center.z + sin(a) * baseRadius * 0.5))
+            let st = CityLayout.nearestStreet(p.x, p.y)
+            let dir: SIMD2<Float> = st.alongX ? SIMD2(center.x > p.x ? 1 : -1, 0) : SIMD2(0, center.z > p.y ? 1 : -1)
+            return (SIMD3(p.x, CityLayout.ground(p.x, p.y) + 34 + Float(slot % 3) * 4, p.y), atan2(-dir.x, -dir.y))
+        }
         let a = Float(slot) / Float(max(count, 2)) * 2 * .pi + 0.4
         let r = baseRadius * 0.55
         let x = center.x + cos(a) * r, z = center.z + sin(a) * r
@@ -128,6 +138,13 @@ final class Arena {
         for (dx, dz) in [(0, 0), (20, 0), (-20, 0), (0, 20), (0, -20)] as [(Float, Float)] { g = max(g, TerrainShape.ground(x + dx, z + dz)) }
         let to = SIMD2(center.x - x, center.z - z)
         return (SIMD3(x, max(g + 45, center.y + 70), z), atan2(-to.x, -to.y))
+    }
+
+    /// The nearest point on a street centre line (Skyline City).
+    static func onStreet(_ p: SIMD2<Float>) -> SIMD2<Float> {
+        let st = CityLayout.nearestStreet(p.x, p.y)
+        let c = Float(st.index) * CityLayout.pitch
+        return st.alongX ? SIMD2(p.x, c) : SIMD2(c, p.y)
     }
 
     private static func stripes() -> CGImage {
@@ -163,6 +180,11 @@ final class HealthOrbs {
             var p: SIMD3<Float>
             if caves {
                 p = arena.spawn(slot: k + 8, count: 6, spawnYaw: spawnYaw).0
+            } else if TerrainShape.active is CityTerrain {
+                let a = Float(k) / 6 * 2 * .pi + 0.9
+                let r = arena.baseRadius * (k % 2 == 0 ? 0.3 : 0.62)
+                let q = Arena.onStreet(SIMD2(arena.center.x + cos(a) * r, arena.center.z + sin(a) * r))
+                p = SIMD3(q.x, CityLayout.ground(q.x, q.y) + 24 + Float(k % 3) * 6, q.y)
             } else {
                 let a = Float(k) / 6 * 2 * .pi + 0.9
                 let r = arena.baseRadius * (k % 2 == 0 ? 0.3 : 0.62)

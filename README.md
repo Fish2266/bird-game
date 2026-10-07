@@ -6,7 +6,7 @@ Fly a bird by flapping your arms in front of your Mac's camera.
 
 You need a Mac running **macOS 14 Sonoma or newer** with a camera (Apple Silicon or Intel).
 
-1. **Download** `BirdGame-0.3.1.dmg` from the [latest release](https://github.com/Fish2266/bird-game/releases/latest)
+1. **Download** `BirdGame-1.0.dmg` from the [latest release](https://github.com/Fish2266/bird-game/releases/latest)
    (click the file under **Assets**).
 2. **Open** the downloaded file (it's in your Downloads folder). A window appears.
 3. **Drag** the **Bird Game** icon onto the **Applications** folder in that window.
@@ -42,6 +42,9 @@ you're not allowed to change apps), the menu offers the download page instead.
 Allow camera access the first time. Stand ~2 m back so both hands are in the camera preview
 (bottom-right), then hold your arms out like wings for a second to calibrate.
 
+Bird Game opens on its **title screen**: hold your arms out like wings (which also calibrates you), or press Return,
+to start flying. **Menu** opens the pause menu (Esc) and **Tutorial** starts the tutorial.
+
 The first time you open the game it offers a short **tutorial** (a couple of minutes, +100 coins and a Graduation
 Cap). It walks you through every move, the rings, attacking and the menu, and you can jump to any step or skip it.
 It's always in the menu too (Esc → **Tutorial**). Tab skips ahead a step, Shift-Tab goes back.
@@ -71,15 +74,24 @@ Unlock worlds with coins in the pause menu (Esc → Worlds). In Free Roam all wo
 | Volcano | 250 | ×1.5 + streak | +36 km/h | lava geysers (they rumble and glow first), lava lakes. Hot air over lava gives free lift. |
 | Glow Caves | 400 | ×2 + streak | +22 km/h | tunnel walls and ceilings; rings follow the tunnels |
 | Dogfight | 600 | ×1.5 + streak | +43 km/h | WWI biplanes that line up (“Plane on your tail!”) and fire bursts |
+| Skyline City *(new)* | 500 | ×1.5 + streak | +32 km/h | glass towers to thread between, the elevated train, cranes, a helicopter. Traffic and bird people below, and a subway under the streets to dive into |
+| Dino Valley *(new)* | 700 | ×1.3 + streak | +36 km/h | T. rex bites, swinging tails, pterosaurs, and lava bombs when the volcano erupts. Herds roam, graze and fight below |
+| Wild West *(new)* | 600 | ×1.2 + streak | +43 km/h | canyon walls, steam trains and dust devils. Saloons to fly through, gold in the old mines, longhorns to stampede |
+| The Finale | ? | ? | ? | Finish every goal to find out |
 
 A ring pays 5 coins, times the world's multiplier and your bird's Luck. In challenge worlds, consecutive rings build
 a **streak**: +25% per ring after the first, up to ×2. Getting hit knocks you back, resets your streak and costs
-coins (lava 5, bullets 3, hard wall hits 2). Storm Coast, Slot Canyon, Frozen Peaks and Sky Islands are listed as
-coming soon.
+coins (lava 5, bullets 3, hard wall hits 2).
+
+**Secrets:** the three new worlds hide things to find — the subway, a bridge to fly under and the el to race in
+Skyline City; a dinosaur fight, a Brachiosaurus's belly, the crater, an eruption, a fossil, a nest and a waterfall in
+Dino Valley; the saloon, the mine and its gold, the trestle (with and without a train on it), the steam train, the river
+and a stampede in the Wild West. Each pays coins the first time, the world's page (Esc → Worlds) counts how many
+you've found, and goals reward finding them all.
 
 ## Game modes
 
-Pick a mode and a map in the pause menu (Esc → Play). Every mode works on all four maps, alone or over LAN,
+Pick a mode and a map in the pause menu (Esc → Play). Every mode works on every map, alone or over LAN,
 and every mode pays out coins (scaled by your bird's Luck).
 
 | Mode | What it is |
@@ -91,7 +103,8 @@ and every mode pays out coins (scaled by your bird's Luck).
 
 **Coins per race:** 40 for finishing, up to 40 more for the rings or checkpoints you made, 15 for a personal best,
 and 15 / 30 / 50 for a bronze / silver / gold medal (double the first time you earn that medal on a course), all
-times the map's race bonus (Home Isles ×1, Volcano ×1.15, Glow Caves ×1.3, Dogfight ×1.2) and your Luck.
+times the map's race bonus (Home Isles ×1, Volcano ×1.15, Glow Caves ×1.3, Dogfight ×1.2, Skyline City ×1.3,
+Dino Valley ×1.25, Wild West ×1.25) and your Luck.
 **Coins per fight:** 60 / 30 / 15 for first / second / third place plus 1 per hit you land, times 0.75 on Easy,
 1 on Normal and 1.4 on Hard; every bird you knock out pays 8 more on the spot.
 
@@ -107,6 +120,9 @@ Race courses are the same every time, so best times mean something. Each map has
 | Volcano | lava geysers beside the course that erupt in turn, basalt column clusters, plus the world's own geysers |
 | Glow Caves | stalactite crushers that slam down, glowing crystal columns |
 | Dogfight | a barn to fly straight through, farm windmills, barrage balloons on cables, grain silos — and the biplanes still hunt you in every mode |
+| Skyline City | a wrecking ball swinging across the street, a glass skywalk to duck under, parade balloons on ropes, a hovering news helicopter, an elevated train crossing the course |
+| Dino Valley | a fossil ribcage to fly through, a fallen giant conifer, steam geysers that blow on a timer, pterosaurs circling a gate |
+| Wild West | a sandstone arch, a hoodoo slalom, an ore cart rattling across a rail bridge (time it), a windpump's turning wheel, a low timber trestle |
 
 All race courses also have blue boost rings.
 
@@ -127,7 +143,8 @@ The host picks the mode and map in the Play tab (everyone switches with them) an
 **Chat**: press **T** in the game to type a message to everyone (Return sends, Esc closes); messages show at the
 bottom left for a few seconds. While paused, the LAN tab has the whole conversation and a box to reply.
 
-Everyone needs the **same version** of Bird Game: 0.3 and 0.3.1 play together, but neither can play with 0.2.x.
+Everyone needs the **same version** of Bird Game: 1.0 only plays with 1.0 (it has new maps); 0.3 and 0.3.1
+play together.
 A friend on another version shows up in the list marked "Different version" instead of being hidden. Everyone sees
 each other's outfits and trails.
 
@@ -156,7 +173,8 @@ If someone's Mac sleeps or leaves the Wi-Fi, the others notice within about 8 se
 ### Host from an iPhone (Bird Server)
 
 **Bird Server** (in `Server/`) is an iPhone app that hosts LAN games without playing in them. Everyone plays on
-their Macs and joins "*name*'s game" from the LAN tab as usual. Any Mac with Bird Game 0.3 or newer can join.
+their Macs and joins "*name*'s game" from the LAN tab as usual. Macs need the same version of Bird Game that Bird Server
+was built for (its Settings say which), so when Bird Game updates, run Bird Server from Xcode again to update it too.
 
 On the phone you pick the mode, map and rules, start rounds (and end one early), and see who's in the game and how
 they're doing. You can invite players who are online, remove players (and allow them back), and chat with everyone.
@@ -209,7 +227,7 @@ Progress is saved automatically.
 
 ## Style
 
-Esc → **Style** dresses your bird: 16 hats, 10 pairs of glasses, 7 things for your neck, 13 trails and 15 paint jobs.
+Esc → **Style** dresses your bird: 17 hats, 10 pairs of glasses, 8 things for your neck, 13 trails and 15 paint jobs.
 Click anything to try it on in the preview first; buying it puts it on. Everything fits every bird, and everyone in a
 LAN game sees what you're wearing.
 
@@ -221,13 +239,14 @@ LAN game sees what you're wearing.
 | Trails | Contrails 100, Sparkles 120, Bubbles 120 | Hearts 250, Autumn Leaves 250, Snowflakes 250, Music Notes 280, Confetti 300 | Airshow Smoke 500, Rainbow 600, Fire 650 | Neon 1000, Stardust 1400 |
 | Paint | Snowy 100, Robin 100, Blue Jay 120 | Flamingo 200, Sunset 250, Tropical 250, Cotton Candy 250 | Camo 400, Tiger 450, Midnight 500 | Neon 900, Chrome 1000, Galaxy 1500 |
 
-Seven more (Graduation Cap, Explorer's Hat, Viking Helmet, Halo, Gold Medal, Flower Lei and Solid Gold paint) can't be
-bought: they're rewards for goals.
+Nine more (Graduation Cap, Explorer's Hat, Viking Helmet, Halo, Dino Hood, Gold Medal, Flower Lei, Sheriff's Star and
+Solid Gold paint) can't be bought: they're rewards for goals.
 
 ## Goals
 
-Esc → **Goals** lists 16 goals, from finishing the tutorial to flying 100 km, each paying coins or unlocking a special
-outfit. You get a message the moment you reach one.
+Esc → **Goals** lists 36 goals, from finishing the tutorial to winning gold on every course, each paying coins or
+unlocking a special outfit. You get a message the moment you reach one. Finish every one of them (Flock together is a
+bonus) and something opens.
 
 | Goal | Reward |
 |---|---|
@@ -242,7 +261,27 @@ outfit. You get a message the moment you reach one.
 | Top bird: win a PvP fight | 80 |
 | Unbeatable: win a fight against Hard bots | Viking Helmet |
 | Knockout artist: knock out 25 birds | 150 |
-| Globetrotter: fly in every world | Explorer's Hat |
+| Globetrotter: fly in 4 different worlds | Explorer's Hat |
+| World tour: fly in all 7 worlds | 300 |
+| Sightseer: find 10 secrets | 150 |
+| Urban explorer: find every secret in Skyline City | 200 |
+| Paleontologist: find every secret in Dino Valley | 100 + Dino Hood |
+| Sheriff: find every secret in the Wild West | 100 + Sheriff's Star |
+| Podium everywhere: a medal on every race course (both races, all 7 worlds) | 400 |
+| Gold rush: gold on every race course | 1000 |
+| Ring legend: 5,000 rings | 600 |
+| On fire: a 20-ring streak in a challenge world | 300 |
+| Terminal velocity: dive faster than 300 km/h | 250 |
+| Racer: finish 50 races | 400 |
+| Flawless: 5 Ring Races without missing a ring | 400 |
+| Champion: win 25 PvP fights | 500 |
+| Hard as nails: win 10 fights against Hard bots | 600 |
+| Knockout king: knock out 100 birds | 500 |
+| Secret keeper: every secret in the new worlds | 600 |
+| Fully loaded: max out every stat on one bird | 400 |
+| Fashion icon: own 25 cosmetics | 400 |
+| Tycoon: earn 10,000 coins in total | 500 |
+| Around the world: fly 500 km in total | 600 |
 | Flock together: play a LAN game with a friend | Flower Lei |
 | Aviary: own every bird | 300 |
 | Dressed to impress: own 5 cosmetics | 100 |

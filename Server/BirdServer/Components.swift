@@ -16,7 +16,8 @@ enum Maps {
     }
 
     static let all = [Info(id: "meadow", name: "Home Isles"), Info(id: "volcano", name: "Volcano"),
-                      Info(id: "caves", name: "Glow Caves"), Info(id: "dogfight", name: "Dogfight")]
+                      Info(id: "caves", name: "Glow Caves"), Info(id: "dogfight", name: "Dogfight"),
+                      Info(id: "city", name: "Skyline City"), Info(id: "dino", name: "Dino Valley"), Info(id: "west", name: "Wild West")]
 
     static func name(_ id: String) -> String { all.first { $0.id == id }?.name ?? id.capitalized }
 

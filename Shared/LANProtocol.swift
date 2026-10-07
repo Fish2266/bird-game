@@ -14,10 +14,10 @@ import simd
 /// dedicated server (Bird Server: it hosts but doesn't play) and `iv` = the instance ids the host has invited.
 enum LANProtocol {
     static let serviceType = "_birdgame._tcp"
-    /// Everyone in a LAN game needs the same number (0.3 is 5).
-    static let version = 5
+    /// Everyone in a LAN game needs the same number (0.3 and 0.3.1 are 5; 1.0, with its new maps, is 6).
+    static let version = 6
     /// The Bird Game version that speaks `version` (what Bird Server says it runs).
-    static let gameVersion = "0.3"
+    static let gameVersion = "1.0"
     static let maxPlayers = 8
     /// Fixed port, so friends can also join by typing the host's address (falls back to any free port).
     static let port: UInt16 = 47474
@@ -179,6 +179,8 @@ struct NetState: Codable {
     var fit = ""
 
     static let alive = 1, paused = 2, finished = 4, spectator = 8, burning = 16
+    /// 1.0: wearing the jetpack, and it's burning.
+    static let jetpack = 32, jetFiring = 64
 }
 
 enum WeaponKind: String, Codable, CaseIterable {

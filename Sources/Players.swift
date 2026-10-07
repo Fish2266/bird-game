@@ -41,6 +41,7 @@ final class OtherBird {
     private var wasAlive = true
     /// The name tag says "paused" (LAN players with their menu open).
     private var tagPaused = false
+    private var jetClock: Float = 0
 
     init(id: Int, name: String, color: Int, species: String, outfit: String = "", bot: Bool = false) {
         self.id = id
@@ -212,7 +213,10 @@ final class OtherBird {
         guard visible else { return }
         bird.node.simdPosition = pos
         bird.node.simdOrientation = rot
-        bird.tick(dt: dt, speed: simd_length(vel), camera: camera, emitting: alive && !paused)
+        bird.tick(dt: dt, speed: min(simd_length(vel), 120), camera: camera, emitting: alive && !paused)
+        bird.setJetpack(flags & NetState.jetpack != 0)
+        jetClock += dt
+        bird.jet(throttle: flags & NetState.jetFiring != 0 && alive ? 1 : 0, time: jetClock, speed: simd_length(vel))
         if wasAlive && !alive { puff() }
         wasAlive = alive
         // (Birds never fade with opacity: that makes SceneKit build see-through versions of every material on the

@@ -30,6 +30,11 @@ final class GameSCNView: SCNView {
             if e.keyCode == 53 { app.dismissWelcome(); return }
         }
         if e.keyCode == 48 && !e.isARepeat { app?.tutorialKey(back: e.modifierFlags.contains(.shift)); return }
+        // The Finale's cutscene: Esc twice skips it; nothing else gets through.
+        if let app, app.inCutscene {
+            if e.keyCode == 53 && !e.isARepeat { app.cutsceneEsc() }
+            return
+        }
         if setKey(e.keyCode, true) { return }
         guard !e.isARepeat else { return }
         if e.keyCode == 53 { app?.togglePause(); return }
@@ -45,6 +50,7 @@ final class GameSCNView: SCNView {
         case "j": app?.acceptInvite()
         case "t": app?.openChat()
         case "p": app?.takePhoto()
+        case "b": app?.jetKey()
         case "[", "]", ";", "'", ",", ".": break   // test codes (no error beep)
         default: super.keyDown(with: e)
         }
@@ -78,6 +84,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
     let director = MatchDirector()
     var pauseMenu: PauseMenuView!
     var chatView: ChatOverlay!
+    var cutsceneOverlay: CutsceneOverlay!
+    var inCutscene: Bool { game?.cutscene != nil }
+    /// The start menu, while it's up.
+    private(set) var titleScreen: TitleScreen?
+    private var calibratedAtTitle = false
     private(set) var isPaused = false
     private var pendingInvite: Invite?
     private var inviteHide: DispatchWorkItem?
@@ -161,6 +172,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         }
         window.contentView!.addSubview(chatView)
 
+        cutsceneOverlay = CutsceneOverlay(frame: window.contentView!.bounds)
+        cutsceneOverlay.autoresizingMask = [.width, .height]
+        cutsceneOverlay.isHidden = true
+        window.contentView!.addSubview(cutsceneOverlay)
+        hud.setHelpText(jetpack: progress.jetpackOwned && Prefs.jetpack)
+
         tutorial.host = self
         tutorial.overlay.frame = window.contentView!.bounds
         tutorial.overlay.autoresizingMask = [.width, .height]
@@ -181,8 +198,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         hud.setCoins(progress.coins)
         // Players coming from 0.2 may already have done some goals.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.checkGoals() }
-        if !CommandLine.arguments.contains("--demo") && !CommandLine.arguments.contains("--no-welcome") {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.showWelcomeIfNeeded() }
+        let a = CommandLine.arguments
+        // The dev copy only (it has its own save): `--open-finale` marks every goal done, to watch The Finale without
+        // earning it. The real game ignores it.
+        if a.contains("--open-finale"), Bundle.main.bundleIdentifier?.hasSuffix(".devtest") == true {
+            progress.debugCompleteGoals(GoalCatalog.required.map(\.id))
+        }
+        let quickStart = a.contains("--demo") || a.contains("--no-title") || a.contains("--host-lan") || a.contains("--join-lan")
+        if quickStart {
+            if !a.contains("--demo") && !a.contains("--no-welcome") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.showWelcomeIfNeeded() }
+            }
+        } else {
+            showTitle()
         }
 
         window.makeKeyAndOrderFront(nil)
@@ -288,15 +316,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationWillTerminate(_ notification: Notification) { terminating = true; lan.leave() }
-    func applicationDidBecomeActive(_ notification: Notification) { lan.refreshDiagnostics() }
+    func applicationDidBecomeActive(_ notification: Notification) {
+        lan.refreshDiagnostics()
+        if let t = titleScreen, !isPaused { window.makeFirstResponder(t) }   // Return / Space still start
+    }
     func applicationDidResignActive(_ notification: Notification) {
-        if !isPaused && !CommandLine.arguments.contains("--no-autopause") { togglePause() }
+        // Clicking away pauses a game in progress; on the start menu there's nothing to pause, so it stays as it is.
+        if !isPaused && titleScreen == nil && !CommandLine.arguments.contains("--no-autopause") { togglePause() }
     }
 
     // MARK: Pause / settings / shop
 
+    // MARK: Title screen
+
+    private func showTitle() {
+        let t = TitleScreen(frame: window.contentView!.bounds)
+        t.autoresizingMask = [.width, .height]
+        t.coins = progress.coins
+        t.finaleOpen = progress.finaleUnlocked && !progress.finaleSeen
+        t.crowned = progress.finaleSeen
+        t.onPlay = { [weak self] in self?.leaveTitle() }
+        t.onMenu = { [weak self] in self?.togglePause() }
+        t.onTutorial = { [weak self] in self?.leaveTitle(tutorial: true) }
+        t.onQuit = { NSApp.terminate(nil) }
+        t.onKey = { [weak self] chars in self?.cheatKey(chars) }
+        window.contentView!.addSubview(t, positioned: .below, relativeTo: pauseMenu)
+        titleScreen = t
+        game?.attract = true
+        hud.isHidden = true
+        chatView.isHidden = true
+        sound?.setTitleMusic(0.9)
+        calibratedAtTitle = shared.control.calibrated
+        window.makeFirstResponder(t)
+    }
+
+    /// The pause menu's Main Menu button: back to the title screen (out of any LAN game, tutorial or race first).
+    func backToTitle() {
+        if isPaused { togglePause() }
+        guard titleScreen == nil, game?.cutscene == nil else { return }
+        let wasOnline = inMultiplayer || lan.role == .joining
+        if wasOnline { lan.leave() }
+        if tutorial.active { tutorial.stop(completed: false) }
+        if currentMode != .freeRoam || wasOnline { _ = makeGame(currentWorld, mode: .freeRoam) }
+        showTitle()
+    }
+
+    /// Something was started from the menu over the title screen (a world, a mode, The Finale, a LAN game): the title
+    /// goes, so it can't sit over the cutscene or the game.
+    private func closeTitle() {
+        guard let t = titleScreen else { return }
+        titleScreen = nil
+        t.dismiss()
+        game?.attract = false
+        sound?.setTitleMusic(0)
+        chatView.isHidden = false
+        hud.isHidden = isPaused
+    }
+
+    func leaveTitle(tutorial: Bool = false) {
+        guard let t = titleScreen else { return }
+        if isPaused { togglePause() }
+        titleScreen = nil
+        t.dismiss()
+        game?.attract = false
+        sound?.setTitleMusic(0)
+        hud.isHidden = false
+        chatView.isHidden = false
+        window.makeFirstResponder(scnView)
+        if tutorial {
+            startTutorial()
+        } else if !CommandLine.arguments.contains("--no-welcome") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.showWelcomeIfNeeded() }
+        }
+    }
+
     func togglePause() {
-        guard let game else { return }
+        guard let game, game.cutscene == nil else { return }
         if welcome != nil { dismissWelcome() }
         chatView.close()
         isPaused.toggle()
@@ -320,9 +415,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
             pauseMenu.endTour()
             pauseMenu.isHidden = true
             pauseMenu.didHide()
-            hud.isHidden = false
+            hud.isHidden = titleScreen != nil
             hud.setCoins(progress.coins)
-            window.makeFirstResponder(scnView)
+            if let t = titleScreen {
+                t.coins = progress.coins
+                t.finaleOpen = progress.finaleUnlocked && !progress.finaleSeen
+                window.makeFirstResponder(t)
+            } else {
+                window.makeFirstResponder(scnView)
+            }
         }
     }
 
@@ -344,6 +445,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         settings.onGraphics = { [weak self] q in self?.setGraphics(q) }
         settings.onVSync = { [weak self] on in Prefs.vsync = on; self?.applyVSync() }
         settings.onAutoUpdate = { [weak self] on in self?.setAutoUpdate(on) }
+        settings.onJetpack = { [weak self] on in
+            guard let self else { return }
+            Prefs.jetpack = on
+            self.game?.jetEquipped = on && self.progress.jetpackOwned
+            self.hud.setHelpText(jetpack: on && self.progress.jetpackOwned)
+        }
         pauseMenu.onBirdChanged = { [weak self] sp in self?.applyBird(sp) }
         pauseMenu.onWorldChanged = { [weak self] in self?.travel() }
         pauseMenu.onKey = { [weak self] chars in self?.cheatKey(chars) }
@@ -358,6 +465,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         }
         pauseMenu.onOutfitChanged = { [weak self] _ in self?.outfitChanged() }
         pauseMenu.onTutorial = { [weak self] in self?.startTutorial() }
+        pauseMenu.onMainMenu = { [weak self] in self?.backToTitle() }
     }
 
     // MARK: Updates
@@ -548,8 +656,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
 
     /// Pay out any goals just reached and say so.
     func checkGoals() {
+        let wasOpen = progress.finaleUnlocked
         let done = progress.checkGoals()
         guard !done.isEmpty else { return }
+        if !wasOpen && progress.finaleUnlocked {
+            // The last goal: the way to The Finale opens.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.2) { [weak self] in
+                self?.sound?.fanfare()
+                self?.hud.showToast("Every goal is done.", "Something has opened… Esc → Worlds", color: Rarity.legendary.color)
+            }
+        }
         for g in done {
             // A cosmetic reward says where to find it (it's only put on when that slot was empty).
             let detail = g.cosmetic != nil ? "\(g.rewardText)  ·  it's in Style (Esc)" : (g.rewardText.isEmpty ? g.detail : "\(g.detail)  ·  \(g.rewardText)")
@@ -567,11 +683,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
 
     // MARK: Test coins
 
-    /// Test codes, typed in a row in the game or the menu: [ ] ; ' grants 100 coins, the reverse ' ; ] [ wipes all saved
-    /// progress (coins, birds, outfits, everything), and , . , . , . , . unlocks every cosmetic.
+    /// Test codes, typed in a row in the game, the menu or on the title screen: [ ] ; ' grants 100 coins, the reverse
+    /// ' ; ] [ wipes all saved progress (coins, birds, outfits, everything), , . , . , . , . unlocks every cosmetic, and
+    /// [ ] [ ] [ ] [ ] opens The Finale.
     private var cheatBuffer = ""
     func cheatKey(_ chars: String) {
-        let grant = "[];'", wipe = "';][", wardrobe = ",.,.,.,."
+        let grant = "[];'", wipe = "';][", wardrobe = ",.,.,.,.", finale = "[][][][]"
         guard chars.count == 1, (grant + wardrobe).contains(chars) else { cheatBuffer = ""; return }
         cheatBuffer = String((cheatBuffer + chars).suffix(wardrobe.count))
         if cheatBuffer.hasSuffix(grant) {
@@ -582,6 +699,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         } else if cheatBuffer.hasSuffix(wipe) {
             cheatBuffer = ""
             resetEverything()
+        } else if cheatBuffer == finale {
+            cheatBuffer = ""
+            openFinaleByCode()
         } else if cheatBuffer == wardrobe {
             cheatBuffer = ""
             let n = progress.unlockAllCosmetics()
@@ -592,6 +712,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
             checkGoals()
             if isPaused { pauseMenu.refresh() }
         }
+    }
+
+    private func openFinaleByCode() {
+        let already = progress.finaleUnlocked
+        if !already {
+            progress.openFinaleByCode()
+            sound?.purchase()
+            Log.write("test code: The Finale opened")
+        }
+        let title = already ? "The Finale is already open" : "Cheat code: The Finale is open"
+        hud.showToast(title, "Esc → Worlds → The Finale", color: Rarity.legendary.color)
+        if let t = titleScreen {
+            t.finaleOpen = progress.finaleUnlocked && !progress.finaleSeen
+            t.flash(title + "  ·  Menu → Worlds → The Finale")
+        }
+        if isPaused { pauseMenu.refresh() }
     }
 
     /// Back to a brand-new player: no coins, birds, worlds, outfits or stats (the bird is undressed too).
@@ -629,6 +765,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
     @discardableResult
     private func makeGame(_ id: WorldID, mode: GameMode) -> Game {
         let mp = inMultiplayer
+        if mp { closeTitle() }   // into a LAN game from the menu over the title screen
         let sp = progress.selected
         let g = Game(controls: shared, world: id, mode: mode, multiplayer: mp, species: sp, points: progress.points(sp), outfit: progress.outfit)
         g.sound = sound
@@ -651,7 +788,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         g.onNotice = { [weak self] text in
             if text.hasPrefix("Missed") { self?.hud.showWarning(text) } else { self?.hud.addFeed(text) }
         }
+        g.onReward = { [weak self] r in
+            guard let self, let c = self.progress.claim(r, world: id.rawValue) else { return }
+            self.hud.setCoins(self.progress.coins)
+            if r.once {
+                self.sound?.chime()
+                let list = WorldCatalog.secrets[id.rawValue] ?? []
+                let detail = list.contains(r.id) ? "+\(c) coins  ·  secret \(self.progress.secretsFound(id.rawValue)) of \(list.count) here" : "+\(c) coins"
+                self.hud.showToast(r.title, detail, color: Wii.blue)
+            } else {
+                self.hud.addFeed("+\(c) ●  \(r.title)")
+            }
+            self.checkGoals()
+        }
         g.onMatchOver = { [weak self] out in self?.singlePlayerResult(out) }
+        g.jetEquipped = progress.jetpackOwned && Prefs.jetpack
+        g.onJet = { [weak self] on in self?.hud.addFeed(on ? "Jetpack lit! Clap again to let it go out" : "Jetpack out") }
         g.onKnockout = { [weak self] victim in
             guard let self else { return }
             let c = self.progress.award(8, world: id.rawValue)
@@ -674,6 +826,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         }
         g.paused = isPaused
         g.apply(GraphicsQuality.current)
+        g.attract = titleScreen != nil   // a world switch behind the title screen keeps flying itself
         game = g
         mouth.enabled = g.combatOn
         // Compile the new world's shaders (and every attack's, when attacks are possible) in the background,
@@ -692,16 +845,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
 
     /// Switch to the world picked in the shop (stays paused behind the menu).
     private func travel() {
+        closeTitle()
         guard let id = progress.world.kind, id != game?.world.kind else { return }
         if inMultiplayer {
             if lan.role == .hosting { lan.updateLobby(world: id.rawValue) }
             return
         }
+        if id == .finale && !progress.finaleSeen { enterFinale(); return }
         makeGame(id, mode: currentMode)
+    }
+
+    // MARK: The Finale
+
+    /// Into The Finale. The first time, the end: the walk through the castle, the crown, the jetpack.
+    func enterFinale() {
+        guard progress.finaleUnlocked, !inMultiplayer else { NSSound.beep(); return }
+        closeTitle()
+        let info = WorldCatalog.info("finale")
+        progress.selectWorld(info)
+        let g = makeGame(.finale, mode: .freeRoam)
+        guard !progress.finaleSeen else { if isPaused { togglePause() }; return }
+        if isPaused { togglePause() }
+        if welcome != nil { dismissWelcome() }
+        hud.isHidden = true
+        g.onCrowned = { [weak self] in
+            guard let self else { return }
+            self.progress.awardCrown()
+            self.outfitChanged()
+        }
+        g.onCutsceneDone = { [weak self] in self?.finaleDone() }
+        g.startFinaleCutscene()
+        window.makeFirstResponder(scnView)
+        Log.write("finale cutscene started")
+    }
+
+    func cutsceneEsc() {
+        if cutsceneOverlay.escPressed() { game?.skipCutscene() }
+    }
+
+    /// The end of the cutscene: the jetpack is yours (and the crown's on).
+    private func finaleDone() {
+        progress.finishFinale()
+        Prefs.jetpack = true
+        game?.jetEquipped = true
+        hud.setHelpText(jetpack: true)
+        cutsceneOverlay.isHidden = true
+        hud.isHidden = false
+        sound?.fanfare()
+        hud.showToast("You were crowned!", "The Crown of the Sky is yours. It's in Style (Esc)", color: Rarity.legendary.color)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.5) { [weak self] in
+            self?.hud.showToast("The jetpack is yours", "Clap your hands (or press B) to light it. Settings has it on or off", color: Wii.blue)
+        }
+        outfitChanged()
+        Log.write("finale finished")
     }
 
     /// Play tab: start a mode on a map.
     private func play(_ mode: GameMode, _ world: WorldID) {
+        closeTitle()
         switch lan.role {
         case .hosting:
             director.stop()
@@ -712,6 +913,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         default:
             let info = WorldCatalog.info(world.rawValue)
             guard progress.ownsWorld(info) else { NSSound.beep(); return }
+            if world == .finale && !progress.finaleSeen { enterFinale(); return }
             progress.selectWorld(info)
             makeGame(world, mode: mode)
         }
@@ -735,6 +937,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
             let before = progress.bestTime(out.mode, world)
             let bestMedalBefore = progress.bestMedal(out.mode, world)
             let pb = progress.recordRace(out.mode, world, time: t, won: false, medals: out.medals)
+            if out.mode == .ringRace && out.missed == 0 { progress.recordPerfectRace() }
             let medal = Medal.of(t, out.medals)
             if pb, var run = out.ghost {
                 run.bird = progress.selected.id
@@ -1043,6 +1246,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
 
     private func refreshHUD() {
         guard let game else { return }
+        if let t = titleScreen {
+            // Holding the arms out (calibrating) starts the game.
+            let c = shared.control
+            t.calibration = CGFloat(c.calibProgress)
+            if c.calibrated && !calibratedAtTitle && !isPaused { t.go() }
+            calibratedAtTitle = calibratedAtTitle && c.calibrated
+        }
+        if let o = game.cutsceneOverlay {
+            cutsceneOverlay.isHidden = false
+            cutsceneOverlay.show(o)
+            hud.isHidden = true
+        } else if !cutsceneOverlay.isHidden {
+            cutsceneOverlay.isHidden = true
+            hud.isHidden = isPaused
+        }
         let s = game.stats
         hud.update(s, pose: shared.pose, cameraName: camera.device?.localizedName ?? "No camera")
         tutorial.tick()
@@ -1106,7 +1324,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
                             hudOpacity: hudOpacity, cameras: CameraManager.availableDevices().map { ($0.uniqueID, $0.localizedName) },
                             currentCamera: camera.device?.uniqueID, preview: hud.showPreview, graphics: GraphicsQuality.pinned,
                             automaticGraphics: GraphicsQuality.automatic, vsync: Prefs.vsync,
-                            screenMaxFPS: window?.screen?.maximumFramesPerSecond ?? NSScreen.main?.maximumFramesPerSecond ?? 60)
+                            screenMaxFPS: window?.screen?.maximumFramesPerSecond ?? NSScreen.main?.maximumFramesPerSecond ?? 60,
+                            jetpack: progress.jetpackOwned ? Prefs.jetpack : nil)
     }
 
     // MARK: Graphics
@@ -1231,6 +1450,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SCNSceneRendererDelega
         sound?.setUIMuted(muted)
     }
     func attack() { game?.keys.attack = true }
+    /// B: light the jetpack or put it out (once it's yours and on your back).
+    func jetKey() {
+        guard progress.jetpackOwned, Prefs.jetpack else { return }
+        game?.keys.jet = true
+    }
 
     /// T: type a message to everyone in the LAN game.
     func openChat() {

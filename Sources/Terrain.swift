@@ -13,6 +13,16 @@ enum TerrainShape {
     /// Ground or water/lava surface, whichever is higher.
     static func ground(_ x: Float, _ z: Float) -> Float { max(active.height(x, z), active.waterLevel) }
 
+    /// What's under a point for collisions: a tunnel floor when it's down in one, else the ground.
+    static func collisionHeight(_ x: Float, _ z: Float, _ y: Float) -> Float {
+        active.tunnelFloor(x, z, y) ?? active.height(x, z)
+    }
+
+    /// `collisionHeight`, or the water/lava surface if that's higher.
+    static func collisionGround(_ x: Float, _ z: Float, _ y: Float) -> Float {
+        max(collisionHeight(x, z, y), active.waterLevel)
+    }
+
     static func ceiling(_ x: Float, _ z: Float) -> Float? { active.ceiling(x, z) }
 
     /// World 1 ("Home Isles") height.
@@ -93,10 +103,13 @@ struct MeshBuilder {
     var col: [Float] = []
     var uv: [Float] = []
     var idx: [UInt32] = []
+    /// A switched-off builder ignores everything added to it (for passes that only want some of a chunk's parts).
+    var disabled = false
     var vertexCount: UInt32 { UInt32(pos.count / 3) }
     var isEmpty: Bool { idx.isEmpty }
 
     mutating func vertex(_ p: SIMD3<Float>, _ n: SIMD3<Float>, _ c: SIMD3<Float>, uv t: SIMD2<Float> = .zero) {
+        if disabled { return }
         pos += [p.x, p.y, p.z]
         uv += [t.x, t.y]
         nrm += [n.x, n.y, n.z]
@@ -104,7 +117,7 @@ struct MeshBuilder {
         col += [pow(c.x, 2.2), pow(c.y, 2.2), pow(c.z, 2.2)]
     }
 
-    mutating func tri(_ a: UInt32, _ b: UInt32, _ c: UInt32) { idx += [a, b, c] }
+    mutating func tri(_ a: UInt32, _ b: UInt32, _ c: UInt32) { if !disabled { idx += [a, b, c] } }
 
     func geometry() -> SCNGeometry {
         let n = pos.count / 3
@@ -132,6 +145,10 @@ final class TerrainManager {
     private var chunks: [ChunkKey: SCNNode] = [:]
     private var inFlight = Set<ChunkKey>()
     private var ready: [(ChunkKey, SCNNode)] = []
+    /// Close-up detail, only for chunks near the player.
+    private var details: [ChunkKey: SCNNode] = [:]
+    private var detailInFlight = Set<ChunkKey>()
+    private var detailReady: [(ChunkKey, SCNNode)] = []
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "bird.terrain", qos: .userInitiated, attributes: .concurrent)
     private let material: SCNMaterial
@@ -156,9 +173,69 @@ final class TerrainManager {
         g.diffuse.contents = NSColor.white
         g.diffuse.intensity = 2.2   // bright enough to bloom in HDR
         glowMaterial = g
+        terrain.configure(ground: m, glow: g)
     }
 
     var loadedCount: Int { chunks.count }
+    var detailCount: Int { details.count }
+
+    /// Parts of a chunk named "swap:…" stand in for its close-up detail, so they hide while the detail is there.
+    private func swap(_ chunk: SCNNode?, detail: Bool) {
+        guard let chunk else { return }
+        for n in chunk.childNodes where n.name?.hasPrefix("swap:") == true { n.isHidden = detail }
+    }
+
+    /// Distance from a point to a chunk's square (0 inside it).
+    private func distance(_ p: SIMD3<Float>, _ k: ChunkKey) -> Float {
+        let x0 = Float(k.x) * chunkSize, z0 = Float(k.z) * chunkSize
+        let dx = max(x0 - p.x, 0, p.x - (x0 + chunkSize)), dz = max(z0 - p.z, 0, p.z - (z0 + chunkSize))
+        return sqrt(dx * dx + dz * dz)
+    }
+
+    private func updateDetail(center: SIMD3<Float>, synchronous: Bool) {
+        let reach = terrain.detailDistance
+        guard reach > 0 else { return }
+        lock.lock()
+        let batch = synchronous ? detailReady : Array(detailReady.prefix(2))
+        detailReady.removeFirst(batch.count)
+        lock.unlock()
+        for (key, node) in batch {
+            detailInFlight.remove(key)
+            // Moved on before it was ready: don't bother.
+            guard distance(center, key) < reach + 200 else { continue }
+            root.addChildNode(node)
+            details[key] = node
+            swap(chunks[key], detail: true)
+        }
+        for (key, node) in details where distance(center, key) > reach + 160 {
+            node.removeFromParentNode()
+            details.removeValue(forKey: key)
+            swap(chunks[key], detail: false)
+        }
+        let cx = Int(floor(center.x / chunkSize)), cz = Int(floor(center.z / chunkSize))
+        let r = Int(ceil(reach / chunkSize)) + 1
+        var wanted: [(ChunkKey, Float)] = []
+        for dz in -r...r {
+            for dx in -r...r {
+                let k = ChunkKey(x: cx + dx, z: cz + dz)
+                let d = distance(center, k)
+                if d < reach && details[k] == nil && !detailInFlight.contains(k) { wanted.append((k, d)) }
+            }
+        }
+        wanted.sort { $0.1 < $1.1 }
+        let budget = synchronous ? wanted.count : max(0, 3 - detailInFlight.count)
+        for (k, _) in wanted.prefix(budget) {
+            detailInFlight.insert(k)
+            let work = { [self] in
+                let node = SCNNode()
+                node.simdPosition = SIMD3(Float(k.x) * chunkSize, 0, Float(k.z) * chunkSize)
+                for n in terrain.detailNodes(key: k, ox: Float(k.x) * chunkSize, oz: Float(k.z) * chunkSize) { node.addChildNode(n) }
+                lock.lock(); detailReady.append((k, node)); lock.unlock()
+            }
+            if synchronous { work() } else { queue.async(execute: work) }
+        }
+        if synchronous && !wanted.isEmpty { updateDetail(center: center, synchronous: true) }
+    }
 
     /// Tileable grey speckle/blotch texture multiplied over the vertex colors (always the same, so made once).
     static func detailTexture() -> CGImage { detail }
@@ -205,6 +282,7 @@ final class TerrainManager {
             inFlight.remove(key)
             root.addChildNode(node)
             chunks[key] = node
+            if details[key] != nil { swap(node, detail: true) }
         }
 
         // Drop far chunks.
@@ -235,7 +313,8 @@ final class TerrainManager {
             }
             if synchronous { work() } else { queue.async(execute: work) }
         }
-        if synchronous && !wanted.isEmpty { update(center: center, synchronous: true) }
+        if synchronous && !wanted.isEmpty { update(center: center, synchronous: true); return }
+        updateDetail(center: center, synchronous: synchronous)
     }
 
     // MARK: Chunk generation
@@ -261,6 +340,9 @@ final class TerrainManager {
             gn.castsShadow = false
             node.addChildNode(gn)
         }
+        for extra in terrain.extraNodes(key: key, ox: Float(key.x) * chunkSize, oz: Float(key.z) * chunkSize) {
+            node.addChildNode(extra)
+        }
         return node
     }
 
@@ -271,7 +353,8 @@ final class TerrainManager {
         var m = MeshBuilder()
         m.pos.reserveCapacity((n + 1) * (n + 1) * 3 + 4 * (n + 1) * 3)
         let t = terrain
-        addGrid(&m, n: n, step: step, ox: ox, oz: oz, sample: { t.height($0, $1) }, color: t.color, flip: false)
+        addGrid(&m, n: n, step: step, ox: ox, oz: oz, sample: { t.height($0, $1) }, color: t.color, flip: false,
+                hole: n == t.cells ? { t.isHole($0, $1) } : nil)
         if t.lowCells != nil {
             // Skirts hide cracks between LOD levels.
             let row = UInt32(n + 1)
@@ -306,7 +389,7 @@ final class TerrainManager {
     /// One height-field sheet. `flip` makes it face downward (cave ceilings).
     private func addGrid(_ m: inout MeshBuilder, n: Int, step: Float, ox: Float, oz: Float,
                          sample: (Float, Float) -> Float,
-                         color: (Float, Float, Float, Float) -> SIMD3<Float>, flip: Bool) {
+                         color: (Float, Float, Float, Float) -> SIMD3<Float>, flip: Bool, hole: ((Float, Float) -> Bool)? = nil) {
         let w = n + 3  // one-sample border on each side for normals
         var hs = [Float](repeating: 0, count: w * w)
         for j in 0..<w {
@@ -331,8 +414,16 @@ final class TerrainManager {
         let row = UInt32(n + 1)
         for j in 0..<UInt32(n) {
             for i in 0..<UInt32(n) {
+                if let hole, hole(ox + (Float(i) + 0.5) * step, oz + (Float(j) + 0.5) * step) { continue }
                 let a = base + j * row + i, b = a + 1, c = a + row, d = c + 1
-                if flip { m.tri(a, b, c); m.tri(b, d, c) } else { m.tri(a, c, b); m.tri(b, c, d) }
+                // Split each cell along the diagonal that changes height least, so cliffs and ridges running across the
+                // grid follow their contour instead of breaking into saw teeth.
+                let k = (Int(j) + 1) * w + Int(i) + 1
+                if abs(hs[k] - hs[k + w + 1]) < abs(hs[k + 1] - hs[k + w]) {
+                    if flip { m.tri(a, b, d); m.tri(a, d, c) } else { m.tri(a, d, b); m.tri(a, c, d) }
+                } else {
+                    if flip { m.tri(a, b, c); m.tri(b, d, c) } else { m.tri(a, c, b); m.tri(b, c, d) }
+                }
             }
         }
     }

@@ -39,7 +39,8 @@ enum Sky {
             c = simd_mix(v.horizon, v.below, SIMD3(repeating: min(1, -y * 3)))
         }
         let cs = max(simd_dot(d, v.sunDir), 0)
-        c += v.sunGlow * (pow(cs, 12) * 0.12 + pow(cs, 90) * 0.35 + pow(cs, 1800) * 3)
+        let glow: Float = pow(cs, 12) * 0.12 + pow(cs, 90) * 0.35 + pow(cs, 1800) * 3
+        c += v.sunGlow * glow
         return c
     }
 
@@ -56,7 +57,10 @@ enum Sky {
             makeImage(width: size, height: size) { x, y in
                 let u = (Float(x) + 0.5) / Float(size) * 2 - 1
                 let v = (Float(y) + 0.5) / Float(size) * 2 - 1
-                let c = color(simd_normalize(f(u, v)), look)
+                // SceneKit shows cube maps mirrored front to back, so flip z: the sun's glow then sits where its light
+                // (and every shadow) actually comes from.
+                let d = simd_normalize(f(u, v))
+                let c = color(SIMD3(d.x, d.y, -d.z), look)
                 return SIMD4(c, 1)
             }
         }
@@ -72,11 +76,12 @@ final class Water {
     private let tile: Float = 48
     private let size: Float = 9000
 
-    init() {
+    init(color: SIMD3<Float>? = nil) {
         let plane = SCNPlane(width: CGFloat(size), height: CGFloat(size))
         let m = SCNMaterial()
         m.lightingModel = .physicallyBased
-        m.diffuse.contents = NSColor(srgbRed: 0.06, green: 0.25, blue: 0.34, alpha: 1)
+        let c = color ?? SIMD3(0.06, 0.25, 0.34)
+        m.diffuse.contents = NSColor(srgbRed: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: 1)
         m.roughness.contents = 0.12
         m.metalness.contents = 0.0
         m.normal.contents = Water.normalMap()
@@ -211,6 +216,8 @@ final class CloudField {
 func makeMotes(_ kind: MoteKind = .dust) -> SCNParticleSystem {
     if kind == .embers { return makeEmbers() }
     if kind == .fireflies { return makeFireflies() }
+    if kind == .pollen { return makePollen() }
+    if kind == .sand { return makeSand() }
     let ps = SCNParticleSystem()
     ps.birthRate = 700
     ps.emitterShape = SCNBox(width: 70, height: 40, length: 70, chamferRadius: 0)
@@ -264,6 +271,55 @@ func makeEmbers() -> SCNParticleSystem {
     let fade = CAKeyframeAnimation()
     fade.values = [0, 1, 1, 0]
     fade.keyTimes = [0, 0.15, 0.6, 1]
+    ps.propertyControllers = [.opacity: SCNParticlePropertyController(animation: fade)]
+    return ps
+}
+
+/// Fluffy seeds and pollen drifting in the humid air (Dino Valley).
+func makePollen() -> SCNParticleSystem {
+    let ps = SCNParticleSystem()
+    ps.birthRate = 220
+    ps.emitterShape = SCNBox(width: 80, height: 40, length: 80, chamferRadius: 0)
+    ps.birthLocation = .volume
+    ps.particleLifeSpan = 3
+    ps.particleLifeSpanVariation = 1
+    ps.particleSize = 0.08
+    ps.particleSizeVariation = 0.04
+    ps.particleVelocity = 0.8
+    ps.particleVelocityVariation = 0.5
+    ps.spreadingAngle = 180
+    ps.particleColor = NSColor(srgbRed: 1.0, green: 0.97, blue: 0.82, alpha: 0.75)
+    ps.blendMode = .additive
+    ps.isLightingEnabled = false
+    ps.particleImage = softDot()
+    let fade = CAKeyframeAnimation()
+    fade.values = [0, 1, 1, 0]
+    fade.keyTimes = [0, 0.25, 0.7, 1]
+    ps.propertyControllers = [.opacity: SCNParticlePropertyController(animation: fade)]
+    return ps
+}
+
+/// Fine desert sand blowing sideways (Wild West).
+func makeSand() -> SCNParticleSystem {
+    let ps = SCNParticleSystem()
+    ps.birthRate = 420
+    ps.emitterShape = SCNBox(width: 80, height: 40, length: 80, chamferRadius: 0)
+    ps.birthLocation = .volume
+    ps.particleLifeSpan = 1.8
+    ps.particleLifeSpanVariation = 0.6
+    ps.particleSize = 0.05
+    ps.particleSizeVariation = 0.03
+    ps.particleVelocity = 3
+    ps.particleVelocityVariation = 1.5
+    ps.emittingDirection = SCNVector3(1, 0.05, 0.3)
+    ps.spreadingAngle = 20
+    ps.particleColor = NSColor(srgbRed: 1.0, green: 0.88, blue: 0.68, alpha: 0.6)
+    ps.blendMode = .alpha
+    ps.isLightingEnabled = false
+    ps.particleImage = softDot()
+    let fade = CAKeyframeAnimation()
+    fade.values = [0, 1, 1, 0]
+    fade.keyTimes = [0, 0.2, 0.7, 1]
     ps.propertyControllers = [.opacity: SCNParticlePropertyController(animation: fade)]
     return ps
 }

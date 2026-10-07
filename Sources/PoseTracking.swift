@@ -102,6 +102,8 @@ struct ControlState {
     var mouthSeen = false
     /// Goes up by one every time the mouth opens all the way (an attack).
     var attackCount = 0
+    /// Goes up by one for every clap (hands brought together in front of you): lights or puts out the jetpack.
+    var clapCount = 0
 }
 
 /// Turns noisy 2D keypoints into smooth, low-latency flight controls.
@@ -128,6 +130,8 @@ final class ArmInterpreter {
     private var lastHandsSeen: Double = -10
     private var armLen: Float = 0
     private var flapArmed = true
+    private var clapArmed = false
+    private var lastClap: Double = -10
     private var state = ControlState()
 
     // Calibration
@@ -295,6 +299,21 @@ final class ArmInterpreter {
         tuckElev += approach(8, dt) * (fastMean - tuckElev)
         let meanReach = (reach[0] + reach[1]) * 0.5
         let tuck = hands > 0 ? smoothstep(-0.85, -1.2, tuckElev) * smoothstep(0.6, 0.3, meanReach) : 0
+
+        // --- Clap: both hands meet in front of the body (well inside shoulder width, between hip and head height), having
+        // been apart since the last one. Flying never brings the hands together like that.
+        if let a = W[0], let b = W[1], hands == 2 {
+            let gap = simd_distance(a, b)
+            let midX = (S[0].x + S[1].x) / 2, shoulderY = (S[0].y + S[1].y) / 2
+            let c = (a + b) / 2
+            let front = abs(c.x - midX) < sw * 0.8 && c.y > shoulderY - sw * 1.6 && c.y < shoulderY + sw * 1.0
+            if gap > sw * 1.05 { clapArmed = true }
+            if clapArmed && front && gap < sw * 0.42 && t - lastClap > 0.45 {
+                clapArmed = false
+                lastClap = t
+                state.clapCount += 1
+            }
+        }
 
         if hands > 0 { lastHandsSeen = t }
         state.tracking = true
